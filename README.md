@@ -11,10 +11,10 @@ Lightweight Windows TTS tray app using SAPI.
 
 ## Hotkeys
 
-- `Ctrl+Shift+1` - Toggle read/stop
-- `Ctrl+Shift+2` - Cycle speed
-- `Ctrl+Shift+3` - Cycle voice
-- `Ctrl+Shift+Q` - Exit
+- `Alt+1` - Toggle read/stop
+- `Alt+2` - Cycle speed
+- `Alt+3` - Cycle voice
+- `Alt+4` - Exit
 
 ## Build
 

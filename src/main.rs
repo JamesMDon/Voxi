@@ -34,7 +34,7 @@ const HK_EXIT: i32 = 4;
 const VK_1: u32 = 0x31;
 const VK_2: u32 = 0x32;
 const VK_3: u32 = 0x33;
-const VK_Q: u32 = 0x51;
+const VK_4: u32 = 0x34;
 
 const SPEEDS: [i32; 3] = [0, 5, 10];
 const DEFAULT_SPEED_IDX: usize = 2;
@@ -268,10 +268,10 @@ fn main() -> Result<()> {
         init_tray(hwnd)?;
         SetTimer(hwnd, ID_TIMER_CHECK, 100, None);
 
-        let _ = RegisterHotKey(hwnd, HK_READ, MOD_CONTROL | MOD_SHIFT, VK_1);
-        let _ = RegisterHotKey(hwnd, HK_SPEED, MOD_CONTROL | MOD_SHIFT, VK_2);
-        let _ = RegisterHotKey(hwnd, HK_VOICE, MOD_CONTROL | MOD_SHIFT, VK_3);
-        let _ = RegisterHotKey(hwnd, HK_EXIT, MOD_CONTROL | MOD_SHIFT, VK_Q);
+        let _ = RegisterHotKey(hwnd, HK_READ, MOD_ALT, VK_1);
+        let _ = RegisterHotKey(hwnd, HK_SPEED, MOD_ALT, VK_2);
+        let _ = RegisterHotKey(hwnd, HK_VOICE, MOD_ALT, VK_3);
+        let _ = RegisterHotKey(hwnd, HK_EXIT, MOD_ALT, VK_4);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).into() {
@@ -456,10 +456,10 @@ fn get_nid(hwnd: HWND) -> NOTIFYICONDATAW {
 
 unsafe fn show_context_menu(hwnd: HWND) {
     let Ok(menu) = CreatePopupMenu() else { return };
-    let _ = AppendMenuW(menu, MF_STRING, IDM_TOGGLE_READ, w!("Toggle Read (Ctrl+Shift+1)"));
-    let _ = AppendMenuW(menu, MF_STRING, IDM_NEXT_SPEED, w!("Next Speed (Ctrl+Shift+2)"));
-    let _ = AppendMenuW(menu, MF_STRING, IDM_NEXT_VOICE, w!("Next Voice (Ctrl+Shift+3)"));
-    let _ = AppendMenuW(menu, MF_STRING, IDM_EXIT, w!("Exit (Ctrl+Shift+Q)"));
+    let _ = AppendMenuW(menu, MF_STRING, IDM_TOGGLE_READ, w!("Toggle Read (Alt+1)"));
+    let _ = AppendMenuW(menu, MF_STRING, IDM_NEXT_SPEED, w!("Next Speed (Alt+2)"));
+    let _ = AppendMenuW(menu, MF_STRING, IDM_NEXT_VOICE, w!("Next Voice (Alt+3)"));
+    let _ = AppendMenuW(menu, MF_STRING, IDM_EXIT, w!("Exit (Alt+4)"));
 
     let mut pt = POINT::default();
     let _ = GetCursorPos(&mut pt);
