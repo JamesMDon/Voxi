@@ -1,0 +1,28 @@
+[package]
+name = "Voxi"
+version = "1.10.0"
+edition = "2021"
+rust-version = "1.80"
+
+[[bin]]
+name = "Voxi"
+path = "src/main.rs"
+
+[dependencies]
+windows = { version = "0.52.0", features = [
+    "Win32_Media_Speech",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+] }
+arboard = "3.6"
+regex = "1.12"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
