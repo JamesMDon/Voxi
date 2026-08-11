@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+      type="win32"
+      name="Voxi.NaturalVoiceAdapter"
+      version="1.0.0.0"
+      processorArchitecture="amd64" />
+  <file name="NaturalVoiceSAPIAdapter.dll">
+    <comClass
+        clsid="{b8b9e38f-e5a2-4661-9fde-4ac7377aa6f6}"
+        threadingModel="Both" />
+    <comClass
+        clsid="{013ab33b-ad1a-401c-8bee-f6e2b046a94e}"
+        threadingModel="Both" />
+  </file>
+</assembly>
