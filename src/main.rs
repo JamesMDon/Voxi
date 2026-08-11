@@ -22,8 +22,8 @@ mod text;
 const APP_NAME: PCWSTR = w!("Voxi");
 const APP_CLASS: PCWSTR = w!("Voxi_Class");
 const APP_MUTEX: PCWSTR = w!("Local\\Voxi.SingleInstance");
-const APP_ICON_IDLE_ID: usize = 1;
-const APP_ICON_ACTIVE_ID: usize = 2;
+const APP_ICON_ACTIVE_ID: usize = 1;
+const APP_ICON_IDLE_ID: usize = 2;
 
 const HK_READ: i32 = 1;
 const HK_SPEED: i32 = 2;
