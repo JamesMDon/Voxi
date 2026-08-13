@@ -26,8 +26,8 @@ static DICTIONARY: LazyLock<Vec<Rule>> = LazyLock::new(|| {
     // Expand multi-character operators before the speech engine interprets
     // their punctuation one character at a time. Handle the longer JavaScript
     // form first so the != rule cannot split it.
-    add_regex(r"!==", " not strictly equal to ");
-    add_regex(r"[\t ]*!=[\t ]*", " not equal to ");
+    add_regex(r"!==", " is not strictly equal to ");
+    add_regex(r"[\t ]*!=[\t ]*", " is not equal to ");
 
     let mut add = |phrase: &str, replacement: &'static str, word_boundaries: bool| {
         let pattern = if word_boundaries {
@@ -215,14 +215,14 @@ mod tests {
     fn reads_not_equal_operator_as_a_complete_operator() {
         assert_eq!(
             preprocess_text("status != ready"),
-            "status not equal to ready"
+            "status is not equal to ready"
         );
-        assert_eq!(to_plain_text("a!=b"), "a not equal to b");
+        assert_eq!(to_plain_text("a!=b"), "a is not equal to b");
         assert_eq!(
             to_sapi_xml("a != b", false),
-            "<speak version='1.0'>a not equal to b</speak>"
+            "<speak version='1.0'>a is not equal to b</speak>"
         );
-        assert_eq!(to_plain_text("a!==b"), "a not strictly equal to b");
+        assert_eq!(to_plain_text("a!==b"), "a is not strictly equal to b");
     }
 
     #[test]
