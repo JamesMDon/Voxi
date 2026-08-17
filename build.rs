@@ -11,10 +11,7 @@ fn main() {
         .set_icon("assets/voxi.ico")
         .set_icon_with_id("assets/voxi-idle.ico", "2")
         .set("ProductName", "Voxi")
-        .set(
-            "FileDescription",
-            "Lightweight Windows text-to-speech tray app",
-        )
+        .set("FileDescription", "Voxi")
         .set("LegalCopyright", "MIT License");
     resource.compile().expect("failed to embed Voxi resources");
 }
