@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "Voxi"
-version = "1.16.4"
+version = "1.16.5"
 dependencies = [
  "arboard",
  "regex",
