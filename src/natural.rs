@@ -11,13 +11,14 @@ use windows::Win32::System::ApplicationInstallationAndServicing::{
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL};
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_OPTION_VOLATILE,
+    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, REG_OPTION_VOLATILE,
 };
 
 const ENUMERATOR: GUID = GUID::from_u128(0xb8b9e38f_e5a2_4661_9fde_4ac7377aa6f6);
 const CONFIG_PATH: PCWSTR = windows::core::w!("Software\\NaturalVoiceSAPIAdapter\\Enumerator");
 const CONFIG_ROOT: PCWSTR = windows::core::w!("Software\\NaturalVoiceSAPIAdapter");
+const CONFIG_OWNER: PCWSTR = windows::core::w!("VoxiTemporaryConfiguration");
 
 pub(crate) struct NaturalVoice {
     pub(crate) engine: ISpVoice,
@@ -46,11 +47,16 @@ impl AdapterConfigGuard {
         let mut existing = HKEY::default();
         if RegOpenKeyExW(HKEY_CURRENT_USER, CONFIG_ROOT, 0, KEY_READ, &mut existing).is_ok() {
             let _ = RegCloseKey(existing);
-            return Err(Error::new(
-                E_FAIL,
-                "A NaturalVoiceSAPIAdapter user configuration already exists, so Voxi left it untouched."
-                    .into(),
-            ));
+            let owned_by_voxi = has_voxi_temporary_config();
+            if owned_by_voxi {
+                RegDeleteTreeW(HKEY_CURRENT_USER, CONFIG_ROOT)?;
+            } else {
+                return Err(Error::new(
+                    E_FAIL,
+                    "A NaturalVoiceSAPIAdapter user configuration already exists, so Voxi left it untouched."
+                        .into(),
+                ));
+            }
         }
 
         let mut key = HKEY::default();
@@ -82,7 +88,8 @@ impl AdapterConfigGuard {
                 REG_DWORD,
                 Some(&enabled),
             )
-        });
+        })
+        .and_then(|_| RegSetValueExW(key, CONFIG_OWNER, 0, REG_DWORD, Some(&enabled)));
         let _ = RegCloseKey(key);
         if let Err(error) = result {
             let _ = RegDeleteTreeW(HKEY_CURRENT_USER, CONFIG_ROOT);
@@ -91,6 +98,29 @@ impl AdapterConfigGuard {
 
         Ok(Self)
     }
+}
+
+unsafe fn has_voxi_temporary_config() -> bool {
+    let mut key = HKEY::default();
+    if RegOpenKeyExW(HKEY_CURRENT_USER, CONFIG_PATH, 0, KEY_READ, &mut key).is_err() {
+        return false;
+    }
+
+    let mut marker = 0u32;
+    let mut size = size_of::<u32>() as u32;
+    let owned_by_voxi = RegQueryValueExW(
+        key,
+        CONFIG_OWNER,
+        None,
+        None,
+        Some((&mut marker as *mut u32).cast()),
+        Some(&mut size),
+    )
+    .is_ok()
+        && marker == 1
+        && size == size_of::<u32>() as u32;
+    let _ = RegCloseKey(key);
+    owned_by_voxi
 }
 
 impl Drop for AdapterConfigGuard {
