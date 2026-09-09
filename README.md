@@ -28,7 +28,7 @@ Lightweight Windows text-to-speech tray app using SAPI, with an optional private
 
 The menu shows Read while idle & Stop while speaking, including live updates
 while open. Read uses a speech bubble & Stop uses a stop square. Selecting Stop
-never starts another reading. The voice menu shows MS Eva or MS Guy; changes announce
+never starts another reading. The voice menu shows Eva or Guy; changes announce
 only the voice's first name: Eva or Guy.
 
 Changing speed while reading preserves your place. Eva changes speed directly;

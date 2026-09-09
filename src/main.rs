@@ -365,7 +365,7 @@ unsafe fn load_voices(
         voices.push(VoiceChoice {
             engine,
             _token: token,
-            name: "MS Guy".to_owned(),
+            name: "Guy".to_owned(),
             natural: true,
         });
         natural_runtime = Some(runtime);
@@ -604,11 +604,7 @@ unsafe fn cycle_voice(hwnd: HWND) {
             .engine
             .SetRate(SPEEDS[state.speed_idx].rate)
             .map_err(|error| error.to_string())?;
-        let voice_name = &state.voices[next_idx].name;
-        let name = voice_name
-            .strip_prefix("MS ")
-            .unwrap_or(voice_name)
-            .to_owned();
+        let name = state.voices[next_idx].name.clone();
         speak_text_inner(hwnd, state, &name, SpeechKind::Announcement)
             .map_err(|error| error.to_string())
     });
@@ -859,7 +855,7 @@ fn friendly_voice_name(full_name: &str) -> String {
             .next()
             .unwrap_or("Voice")
             .trim_matches(|character: char| !character.is_alphanumeric());
-        return format!("MS {short_name}");
+        return short_name.to_owned();
     }
 
     let base_name = trimmed
@@ -1077,14 +1073,11 @@ mod tests {
 
     #[test]
     fn microsoft_voice_names_are_compact() {
-        assert_eq!(
-            friendly_voice_name("Microsoft Ava Online (Natural)"),
-            "MS Ava"
-        );
-        assert_eq!(friendly_voice_name("Microsoft Eva Mobile"), "MS Eva");
+        assert_eq!(friendly_voice_name("Microsoft Ava Online (Natural)"), "Ava");
+        assert_eq!(friendly_voice_name("Microsoft Eva Mobile"), "Eva");
         assert_eq!(
             friendly_voice_name("Microsoft Guy(Natural) - English (United States)"),
-            "MS Guy"
+            "Guy"
         );
     }
 
