@@ -11,6 +11,10 @@ Lightweight Windows text-to-speech tray app using SAPI, with an optional private
 - Prewarmed Microsoft Guy natural voice at native SAPI rate 10
 - Adjustable speech speed
 - Built-in pronunciation dictionary for URLs, acronyms, emojis
+- Read Markdown content & link labels without formatting noise
+- Decode HTML entities & expand numeric multiplication and common math symbols
+- Preserve punctuation & following text when shortening URLs
+- Queue 2 seconds of silent audio after speech to help with Bluetooth end clipping
 - Idle and speaking tray states with embedded white line icons
 - Compact native menu with transparent colored line icons
 - Single-instance protection and automatic tray recovery after Explorer restarts
@@ -21,6 +25,24 @@ Lightweight Windows text-to-speech tray app using SAPI, with an optional private
 - `Alt+2` - Cycle speed
 - `Alt+3` - Cycle voice
 - `Alt+4` - Exit
+
+The menu shows Read while idle & Stop while speaking, including live updates
+while open. Read uses a speech bubble & Stop uses a stop square. Selecting Stop
+never starts another reading. The voice menu shows MS Eva or MS Guy; changes announce
+only the voice's first name: Eva or Guy.
+
+Changing speed while reading preserves your place. Eva changes speed directly;
+Guy resumes at the current word because its embedded engine cannot adjust an
+utterance already in progress. Guy may repeat that word. The speed presets are
+Slow, Mid & Fast (SAPI rates 0, 5 & 10). Speed announcements replace earlier
+announcements immediately; only clipboard readings are resumed. Voice & speed
+still reset to the startup defaults after exit.
+
+The silent tail uses PCM audio on the same speech output for both voices. Guy's
+embedded engine ignores XML silence tags. This is an app-side workaround;
+whether it resolves Bluetooth clipping depends on the audio device & driver.
+During the silent tail, the tray icon is idle. `Alt+1` starts the next reading
+immediately & `Alt+2` announces the new speed, replacing the remaining silence.
 
 ## Build
 

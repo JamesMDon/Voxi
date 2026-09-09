@@ -19,6 +19,7 @@ const RED: u32 = 0xFF4444;
 #[derive(Clone, Copy)]
 enum IconKind {
     Read,
+    Stop,
     Speed,
     Voice,
     Exit,
@@ -36,6 +37,7 @@ impl Drop for OwnedBitmap {
 
 pub(crate) struct MenuIcons {
     bitmaps: [OwnedBitmap; 4],
+    stop: OwnedBitmap,
 }
 
 impl MenuIcons {
@@ -47,6 +49,7 @@ impl MenuIcons {
                 create_bitmap(IconKind::Voice)?,
                 create_bitmap(IconKind::Exit)?,
             ],
+            stop: create_bitmap(IconKind::Stop)?,
         };
 
         for (item_id, bitmap) in item_ids.into_iter().zip(&icons.bitmaps) {
@@ -64,6 +67,14 @@ impl MenuIcons {
         }
 
         Ok(icons)
+    }
+
+    pub(crate) fn read_bitmap(&self, stopping: bool) -> HBITMAP {
+        if stopping {
+            self.stop.0
+        } else {
+            self.bitmaps[0].0
+        }
     }
 }
 
@@ -130,6 +141,7 @@ fn contains(kind: IconKind, x: f32, y: f32) -> bool {
             rounded_rect(x, y, 2.0, 2.5, 13.5, 11.5, 2.5)
                 || triangle(x, y, (4.0, 13.75), (5.0, 10.25), (8.1, 10.25))
         }
+        IconKind::Stop => rounded_rect(x, y, 3.0, 3.0, 13.0, 13.0, 1.0),
         IconKind::Speed => {
             triangle(x, y, (2.0, 3.0), (2.0, 13.0), (8.0, 8.0))
                 || triangle(x, y, (7.5, 3.0), (7.5, 13.0), (13.5, 8.0))
@@ -197,6 +209,7 @@ mod tests {
     fn menu_icons_have_antialiased_transparent_edges() {
         for kind in [
             IconKind::Read,
+            IconKind::Stop,
             IconKind::Speed,
             IconKind::Voice,
             IconKind::Exit,

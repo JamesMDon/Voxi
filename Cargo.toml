@@ -11,8 +11,10 @@ path = "src/main.rs"
 [dependencies]
 windows = { version = "0.52.0", features = [
     "Win32_Media_Speech",
+    "Win32_Media_Audio",
     "Win32_System_ApplicationInstallationAndServicing",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
     "Win32_System_Threading",
@@ -25,6 +27,8 @@ windows = { version = "0.52.0", features = [
 ] }
 arboard = { version = "3.6", default-features = false }
 regex = "1.12"
+pulldown-cmark = { version = "0.13", default-features = false }
+html-escape = "0.2"
 
 [build-dependencies]
 winresource = { version = "0.1.31", default-features = false }

@@ -17,6 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 mod menu_icons;
 mod natural;
+mod playback;
 mod text;
 
 const APP_NAME: PCWSTR = w!("Voxi");
@@ -36,34 +37,75 @@ const VK_2: u32 = 0x32;
 const VK_3: u32 = 0x33;
 const VK_4: u32 = 0x34;
 
-const SPEEDS: [i32; 3] = [0, 5, 10];
+struct Speed {
+    rate: i32,
+    label: &'static str,
+}
+
+const SPEEDS: [Speed; 3] = [
+    Speed {
+        rate: 0,
+        label: "Slow",
+    },
+    Speed {
+        rate: 5,
+        label: "Mid",
+    },
+    Speed {
+        rate: 10,
+        label: "Fast",
+    },
+];
 const DEFAULT_SPEED_IDX: usize = 2;
 
 const WM_TRAY_ICON: u32 = WM_USER + 1;
 const ID_TRAY_ICON: u32 = 1001;
 const ID_TIMER_CHECK: usize = 1002;
 
-const IDM_TOGGLE_READ: usize = 2000;
+const IDM_READ: usize = 2000;
 const IDM_NEXT_SPEED: usize = 2001;
 const IDM_NEXT_VOICE: usize = 2002;
 const IDM_EXIT: usize = 2003;
+const IDM_STOP: usize = 2004;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadAction {
+    Read,
+    Stop,
+}
+
+impl ReadAction {
+    fn menu_item(self) -> (usize, &'static str) {
+        match self {
+            Self::Read => (IDM_READ, "Alt+1 | Read"),
+            Self::Stop => (IDM_STOP, "Alt+1 | Stop"),
+        }
+    }
+}
 
 const SPRS_IS_SPEAKING: u32 = 2;
-const SPF_ASYNC_PURGE: u32 = 3; // SPF_ASYNC | SPF_PURGE
-const SPF_ASYNC_PURGE_XML: u32 = 11; // SPF_ASYNC | SPF_PURGE | SPF_IS_XML
 const SPF_PURGE: u32 = 2;
 const SPEECH_START_GRACE: Duration = Duration::from_millis(750);
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum SpeechKind {
+    #[default]
+    Reading,
+    Announcement,
+}
 
 #[derive(Default)]
 struct SpeechActivity {
     requested_at: Option<Instant>,
     observed_running: bool,
+    kind: SpeechKind,
 }
 
 impl SpeechActivity {
-    fn begin(&mut self, now: Instant) {
+    fn begin(&mut self, kind: SpeechKind, now: Instant) {
         self.requested_at = Some(now);
         self.observed_running = false;
+        self.kind = kind;
     }
 
     fn stop(&mut self) {
@@ -75,10 +117,29 @@ impl SpeechActivity {
         self.requested_at.is_some()
     }
 
-    fn observe(&mut self, sapi_is_running: bool, now: Instant) -> bool {
+    fn is_reading(&self) -> bool {
+        self.is_active() && self.kind == SpeechKind::Reading
+    }
+
+    fn read_action(&self) -> ReadAction {
+        if self.is_active() {
+            ReadAction::Stop
+        } else {
+            ReadAction::Read
+        }
+    }
+
+    fn observe(&mut self, sapi_is_running: bool, in_tail: bool, now: Instant) -> bool {
         let Some(requested_at) = self.requested_at else {
             return false;
         };
+
+        // The device can still be playing protective silence after the speech
+        // has finished. Presentation and controls are already idle at that point.
+        if in_tail {
+            self.stop();
+            return true;
+        }
 
         if sapi_is_running {
             self.observed_running = true;
@@ -101,6 +162,8 @@ struct AppState {
     voice_idx: usize,
     speed_idx: usize,
     speech: SpeechActivity,
+    playback: Option<playback::Playback>,
+    open_menu: Option<OpenMenu>,
     idle_icon: HICON,
     active_icon: HICON,
     taskbar_created_message: u32,
@@ -112,6 +175,11 @@ struct VoiceChoice {
     _token: ISpObjectToken,
     name: String,
     natural: bool,
+}
+
+struct OpenMenu {
+    handle: HMENU,
+    icons: menu_icons::MenuIcons,
 }
 
 thread_local! {
@@ -240,7 +308,7 @@ fn run() -> Result<()> {
             return Err(Error::from_win32());
         }
 
-        let (voices, natural_runtime) = load_voices(SPEEDS[DEFAULT_SPEED_IDX])?;
+        let (voices, natural_runtime) = load_voices(SPEEDS[DEFAULT_SPEED_IDX].rate)?;
 
         STATE.with(|cell| {
             *cell.borrow_mut() = Some(AppState {
@@ -248,6 +316,8 @@ fn run() -> Result<()> {
                 voice_idx: 0,
                 speed_idx: DEFAULT_SPEED_IDX,
                 speech: SpeechActivity::default(),
+                playback: None,
+                open_menu: None,
                 idle_icon,
                 active_icon,
                 taskbar_created_message,
@@ -295,7 +365,7 @@ unsafe fn load_voices(
         voices.push(VoiceChoice {
             engine,
             _token: token,
-            name: "Microsoft Guy".to_owned(),
+            name: "MS Guy".to_owned(),
             natural: true,
         });
         natural_runtime = Some(runtime);
@@ -392,7 +462,7 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_HOTKEY => {
             match wparam.0 as i32 {
-                HK_READ => toggle_read(hwnd),
+                HK_READ => control_reading(hwnd, None),
                 HK_SPEED => cycle_speed(hwnd),
                 HK_VOICE => cycle_voice(hwnd),
                 HK_EXIT => request_exit(hwnd),
@@ -402,7 +472,7 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_TRAY_ICON => {
             if lparam.0 as u32 == WM_LBUTTONUP {
-                toggle_read(hwnd);
+                control_reading(hwnd, None);
             } else if lparam.0 as u32 == WM_RBUTTONUP {
                 let result = show_context_menu(hwnd).map_err(|error| error.to_string());
                 report_action_result(hwnd, "Could not open the Voxi menu", Some(result));
@@ -411,7 +481,8 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_COMMAND => {
             match wparam.0 & 0xFFFF {
-                IDM_TOGGLE_READ => toggle_read(hwnd),
+                IDM_READ => control_reading(hwnd, Some(ReadAction::Read)),
+                IDM_STOP => control_reading(hwnd, Some(ReadAction::Stop)),
                 IDM_NEXT_SPEED => cycle_speed(hwnd),
                 IDM_NEXT_VOICE => cycle_voice(hwnd),
                 IDM_EXIT => request_exit(hwnd),
@@ -440,32 +511,53 @@ unsafe fn request_exit(hwnd: HWND) {
 
 unsafe fn check_icon_state(hwnd: HWND) {
     with_state(|state| {
-        if !state.speech.is_active() {
-            return;
-        }
-
-        let mut status = SPVOICESTATUS::default();
-        if state.voices[state.voice_idx]
-            .engine
-            .GetStatus(&mut status, std::ptr::null_mut())
-            .is_ok()
-            && state
-                .speech
-                .observe(status.dwRunningState == SPRS_IS_SPEAKING, Instant::now())
-        {
-            let _ = update_tray(hwnd, state);
-        }
+        let _ = refresh_speech_state(hwnd, state);
     });
 }
 
-unsafe fn toggle_read(hwnd: HWND) {
+// The timer and controls share the same speech state. Refresh on input too, so
+// a hotkey at the speech/tail boundary does not depend on the next timer tick.
+unsafe fn refresh_speech_state(hwnd: HWND, state: &mut AppState) -> Result<Option<SPVOICESTATUS>> {
+    if state.playback.is_none() && !state.speech.is_active() {
+        return Ok(None);
+    }
+
+    let mut status = SPVOICESTATUS::default();
+    state.voices[state.voice_idx]
+        .engine
+        .GetStatus(&mut status, std::ptr::null_mut())?;
+    let in_tail = state
+        .playback
+        .as_ref()
+        .is_some_and(|playback| playback.is_in_tail(&status));
+    let changed = state.speech.observe(
+        status.dwRunningState == SPRS_IS_SPEAKING,
+        in_tail,
+        Instant::now(),
+    );
+    // Becoming idle must not cancel or release the queued protective tail.
+    if status.dwRunningState == SPRS_DONE.0 as u32 && !state.speech.is_active() {
+        state.playback = None;
+    }
+    if changed {
+        update_tray(hwnd, state)?;
+    }
+    Ok(Some(status))
+}
+
+unsafe fn control_reading(hwnd: HWND, requested: Option<ReadAction>) {
     let result = with_state(|state| -> std::result::Result<(), String> {
-        if state.speech.is_active() {
+        let _ = refresh_speech_state(hwnd, state);
+        // Menu commands retain their displayed intent even if speech finishes
+        // between rendering the item and clicking it. Hotkeys and tray clicks toggle.
+        let action = requested.unwrap_or_else(|| state.speech.read_action());
+        if action == ReadAction::Stop {
             state.voices[state.voice_idx]
                 .engine
                 .Speak(None, SPF_PURGE, None)
                 .map_err(|error| error.to_string())?;
             state.speech.stop();
+            state.playback = None;
             update_tray(hwnd, state).map_err(|error| error.to_string())?;
             return Ok(());
         }
@@ -475,7 +567,8 @@ unsafe fn toggle_read(hwnd: HWND) {
             return Ok(());
         };
         if !clipboard_text.trim().is_empty() {
-            speak_text_inner(hwnd, state, &clipboard_text).map_err(|error| error.to_string())?;
+            speak_text_inner(hwnd, state, &clipboard_text, SpeechKind::Reading)
+                .map_err(|error| error.to_string())?;
         }
         Ok(())
     });
@@ -503,73 +596,138 @@ unsafe fn cycle_voice(hwnd: HWND) {
             .Speak(None, SPF_PURGE, None)
             .map_err(|error| error.to_string())?;
         state.speech.stop();
+        state.playback = None;
 
         let next_idx = (state.voice_idx + 1) % state.voices.len();
         state.voice_idx = next_idx;
         state.voices[next_idx]
             .engine
-            .SetRate(SPEEDS[state.speed_idx])
+            .SetRate(SPEEDS[state.speed_idx].rate)
             .map_err(|error| error.to_string())?;
-        let name = state.voices[next_idx].name.clone();
-        speak_text_inner(hwnd, state, &name).map_err(|error| error.to_string())
+        let voice_name = &state.voices[next_idx].name;
+        let name = voice_name
+            .strip_prefix("MS ")
+            .unwrap_or(voice_name)
+            .to_owned();
+        speak_text_inner(hwnd, state, &name, SpeechKind::Announcement)
+            .map_err(|error| error.to_string())
     });
     report_action_result(hwnd, "Could not change the voice", result);
 }
 
 unsafe fn cycle_speed(hwnd: HWND) {
     let result = with_state(|state| -> std::result::Result<(), String> {
+        let status = refresh_speech_state(hwnd, state).map_err(|error| error.to_string())?;
+        let reading = state.speech.is_reading();
+        let remaining = if reading && state.voices[state.voice_idx].natural {
+            state
+                .playback
+                .as_ref()
+                .zip(status.as_ref())
+                .and_then(|(playback, status)| playback.remaining_text(status))
+                .map(str::to_owned)
+        } else {
+            None
+        };
         let next_idx = (state.speed_idx + 1) % SPEEDS.len();
-        let new_rate = SPEEDS[next_idx];
+        let speed = &SPEEDS[next_idx];
         state.voices[state.voice_idx]
             .engine
-            .SetRate(new_rate)
+            .SetRate(speed.rate)
             .map_err(|error| error.to_string())?;
         state.speed_idx = next_idx;
-        speak_text_inner(hwnd, state, &format!("Speed {new_rate}"))
-            .map_err(|error| error.to_string())
+        if reading {
+            // Guy cannot change rate mid-utterance. Resume its current word;
+            // Eva applies SetRate directly. Never interrupt with an announcement.
+            if let Some(remaining) = remaining {
+                speak_processed_text(hwnd, state, &remaining, SpeechKind::Reading)
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        } else {
+            // Announcements are replaceable feedback, never resumable reading.
+            speak_text_inner(hwnd, state, speed.label, SpeechKind::Announcement)
+                .map_err(|error| error.to_string())
+        }
     });
     report_action_result(hwnd, "Could not change the speech speed", result);
 }
 
-unsafe fn speak_text_inner(hwnd: HWND, state: &mut AppState, value: &str) -> Result<()> {
-    let first_result = speak_with_voice(&state.voices[state.voice_idx], value);
-    if let Err(error) = first_result {
-        if !state.voices[state.voice_idx].natural {
-            return Err(error);
-        }
-
-        let Some(fallback_idx) = state.voices.iter().position(|voice| !voice.natural) else {
-            return Err(error);
-        };
-        state.voice_idx = fallback_idx;
-        state.voices[fallback_idx]
-            .engine
-            .SetRate(SPEEDS[state.speed_idx])?;
-        speak_with_voice(&state.voices[fallback_idx], value)?;
+unsafe fn speak_text_inner(
+    hwnd: HWND,
+    state: &mut AppState,
+    value: &str,
+    kind: SpeechKind,
+) -> Result<()> {
+    let processed = text::to_plain_text(value);
+    if processed.trim().is_empty() {
+        return Ok(());
     }
+    speak_processed_text(hwnd, state, &processed, kind)
+}
 
-    state.speech.begin(Instant::now());
+unsafe fn speak_processed_text(
+    hwnd: HWND,
+    state: &mut AppState,
+    processed: &str,
+    kind: SpeechKind,
+) -> Result<()> {
+    let choice = &state.voices[state.voice_idx];
+    let result = playback::start(&choice.engine, choice.natural, processed);
+    let playback = match result {
+        Ok(playback) => playback,
+        Err(error) => {
+            if !state.voices[state.voice_idx].natural {
+                return Err(error);
+            }
+
+            let Some(fallback_idx) = state.voices.iter().position(|voice| !voice.natural) else {
+                return Err(error);
+            };
+            state.voice_idx = fallback_idx;
+            state.voices[fallback_idx]
+                .engine
+                .SetRate(SPEEDS[state.speed_idx].rate)?;
+            playback::start(&state.voices[fallback_idx].engine, false, processed)?
+        }
+    };
+
+    state.playback = Some(playback);
+    state.speech.begin(kind, Instant::now());
     update_tray(hwnd, state)
 }
 
-unsafe fn speak_with_voice(choice: &VoiceChoice, value: &str) -> Result<()> {
-    let (payload, flags) = if choice.natural {
-        (text::to_plain_text(value), SPF_ASYNC_PURGE)
-    } else {
-        (text::to_sapi_xml(value, true), SPF_ASYNC_PURGE_XML)
-    };
-    let mut wide: Vec<u16> = payload.encode_utf16().collect();
-    wide.push(0);
-
-    choice.engine.Speak(PCWSTR(wide.as_ptr()), flags, None)?;
-    Ok(())
-}
-
 unsafe fn update_tray(hwnd: HWND, state: &AppState) -> Result<()> {
+    if let Some(menu) = &state.open_menu {
+        update_read_menu_item(menu.handle, state.speech.read_action(), &menu.icons)?;
+        let _ = DrawMenuBar(hwnd);
+    }
     let mut nid = get_nid(hwnd);
     nid.uFlags = NIF_ICON | NIF_TIP;
     apply_tray_appearance(&mut nid, state);
     Shell_NotifyIconW(NIM_MODIFY, &nid).ok()
+}
+
+unsafe fn update_read_menu_item(
+    menu: HMENU,
+    action: ReadAction,
+    icons: &menu_icons::MenuIcons,
+) -> Result<()> {
+    let (command, label) = action.menu_item();
+    let mut text = wide_null(label);
+    SetMenuItemInfoW(
+        menu,
+        0,
+        true,
+        &MENUITEMINFOW {
+            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_STRING | MIIM_ID | MIIM_BITMAP,
+            wID: command as u32,
+            dwTypeData: PWSTR(text.as_mut_ptr()),
+            hbmpItem: icons.read_bitmap(action == ReadAction::Stop),
+            ..Default::default()
+        },
+    )
 }
 
 unsafe fn init_tray(hwnd: HWND, state: &AppState) -> Result<()> {
@@ -618,26 +776,33 @@ fn get_nid(hwnd: HWND) -> NOTIFYICONDATAW {
 
 unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
     let menu = MenuGuard(CreatePopupMenu()?);
-    let (voice_name, speed) = with_state(|state| {
+    let (voice_name, speed, read_action) = with_state(|state| {
+        let _ = refresh_speech_state(hwnd, state);
         let voice_name = state
             .voices
             .get(state.voice_idx)
             .map(|voice| voice.name.clone())
             .unwrap_or_else(|| "Default".to_owned());
-        (voice_name.replace('&', "&&"), SPEEDS[state.speed_idx])
+        (
+            voice_name.replace('&', "&&"),
+            SPEEDS[state.speed_idx].label,
+            state.speech.read_action(),
+        )
     })
-    .unwrap_or_else(|| ("Unavailable".to_owned(), SPEEDS[DEFAULT_SPEED_IDX]));
-    let speak_wide = wide_null("Alt+1 | Read / Stop");
-    let speed_wide = wide_null(&format!("Alt+2 | Speed {speed}"));
+    .unwrap_or_else(|| {
+        (
+            "Unavailable".to_owned(),
+            SPEEDS[DEFAULT_SPEED_IDX].label,
+            ReadAction::Read,
+        )
+    });
+    let (read_command, read_label) = read_action.menu_item();
+    let speak_wide = wide_null(read_label);
+    let speed_wide = wide_null(&format!("Alt+2 | {speed}"));
     let voice_wide = wide_null(&format!("Alt+3 | {voice_name}"));
     let exit_wide = wide_null("Alt+4 | Exit");
 
-    AppendMenuW(
-        menu.0,
-        MF_STRING,
-        IDM_TOGGLE_READ,
-        PCWSTR(speak_wide.as_ptr()),
-    )?;
+    AppendMenuW(menu.0, MF_STRING, read_command, PCWSTR(speak_wide.as_ptr()))?;
     AppendMenuW(
         menu.0,
         MF_STRING,
@@ -652,24 +817,36 @@ unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
     )?;
     AppendMenuW(menu.0, MF_STRING, IDM_EXIT, PCWSTR(exit_wide.as_ptr()))?;
 
-    let _menu_icons = menu_icons::MenuIcons::install(
+    let menu_icons = menu_icons::MenuIcons::install(
         menu.0,
-        [IDM_TOGGLE_READ, IDM_NEXT_SPEED, IDM_NEXT_VOICE, IDM_EXIT],
+        [read_command, IDM_NEXT_SPEED, IDM_NEXT_VOICE, IDM_EXIT],
     )?;
+    update_read_menu_item(menu.0, read_action, &menu_icons)?;
 
     let mut point = POINT::default();
     GetCursorPos(&mut point)?;
     let _ = SetForegroundWindow(hwnd);
-    TrackPopupMenu(
+    with_state(|state| {
+        state.open_menu = Some(OpenMenu {
+            handle: menu.0,
+            icons: menu_icons,
+        })
+    });
+    let command = TrackPopupMenu(
         menu.0,
-        TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON,
+        TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
         point.x,
         point.y,
         0,
         hwnd,
         None,
     )
-    .ok()?;
+    .0 as usize;
+    with_state(|state| state.open_menu = None);
+    // With TPM_RETURNCMD, zero means dismissal, not a failed action.
+    if command != 0 {
+        PostMessageW(hwnd, WM_COMMAND, WPARAM(command), LPARAM(0))?;
+    }
     PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0))?;
     Ok(())
 }
@@ -682,7 +859,7 @@ fn friendly_voice_name(full_name: &str) -> String {
             .next()
             .unwrap_or("Voice")
             .trim_matches(|character: char| !character.is_alphanumeric());
-        return format!("Microsoft {short_name}");
+        return format!("MS {short_name}");
     }
 
     let base_name = trimmed
@@ -742,18 +919,21 @@ fn icon_resource(id: usize) -> PCWSTR {
 
 #[cfg(test)]
 mod tests {
-    use super::{friendly_voice_name, readable_clipboard_text, SpeechActivity, SPEECH_START_GRACE};
+    use super::{
+        friendly_voice_name, readable_clipboard_text, ReadAction, SpeechActivity, SpeechKind,
+        SPEECH_START_GRACE,
+    };
     use std::time::{Duration, Instant};
 
     #[test]
     fn pending_speech_does_not_immediately_return_to_idle() {
         let started_at = Instant::now();
         let mut activity = SpeechActivity::default();
-        activity.begin(started_at);
+        activity.begin(SpeechKind::Reading, started_at);
 
-        assert!(!activity.observe(false, started_at + Duration::from_millis(100)));
+        assert!(!activity.observe(false, false, started_at + Duration::from_millis(100)));
         assert!(activity.is_active());
-        assert!(activity.observe(false, started_at + SPEECH_START_GRACE));
+        assert!(activity.observe(false, false, started_at + SPEECH_START_GRACE));
         assert!(!activity.is_active());
     }
 
@@ -761,24 +941,150 @@ mod tests {
     fn observed_speech_returns_to_idle_when_sapi_finishes() {
         let started_at = Instant::now();
         let mut activity = SpeechActivity::default();
-        activity.begin(started_at);
+        activity.begin(SpeechKind::Reading, started_at);
 
-        assert!(!activity.observe(true, started_at + Duration::from_millis(100)));
+        assert!(!activity.observe(true, false, started_at + Duration::from_millis(100)));
         assert!(activity.is_active());
-        assert!(activity.observe(false, started_at + Duration::from_millis(200)));
+        assert!(activity.observe(false, false, started_at + Duration::from_millis(200)));
         assert!(!activity.is_active());
+    }
+
+    #[test]
+    fn silent_tail_is_idle_even_while_the_audio_device_is_running() {
+        let started_at = Instant::now();
+        let mut activity = SpeechActivity::default();
+        activity.begin(SpeechKind::Reading, started_at);
+        assert!(!activity.observe(true, false, started_at + Duration::from_millis(100)));
+        assert!(activity.observe(true, true, started_at + Duration::from_millis(200)));
+        assert!(!activity.is_active());
+        assert!(!activity.observe(true, true, started_at + Duration::from_millis(300)));
+        assert!(!activity.is_active());
+
+        // A speed announcement or new reading can immediately replace the tail.
+        activity.begin(
+            SpeechKind::Announcement,
+            started_at + Duration::from_millis(400),
+        );
+        assert!(activity.is_active());
+        assert!(!activity.observe(true, false, started_at + Duration::from_millis(500)));
+        assert!(activity.is_active());
+    }
+
+    #[test]
+    fn short_speech_can_reach_the_tail_before_the_first_status_poll() {
+        let started_at = Instant::now();
+        let mut activity = SpeechActivity::default();
+        activity.begin(SpeechKind::Reading, started_at);
+        assert!(activity.observe(true, true, started_at + Duration::from_millis(100)));
+        assert!(!activity.is_active());
+    }
+
+    #[test]
+    fn rapid_speed_announcements_are_replaceable_not_resumable() {
+        let started_at = Instant::now();
+        let mut activity = SpeechActivity::default();
+        for press in 0..30 {
+            let now = started_at + Duration::from_millis(press * 40);
+            activity.begin(SpeechKind::Announcement, now);
+            assert!(activity.is_active());
+            assert!(!activity.is_reading());
+            activity.observe(true, false, now + Duration::from_millis(10));
+            assert!(!activity.is_reading());
+        }
+    }
+
+    #[test]
+    fn only_reading_content_is_resumed_when_speed_changes() {
+        let now = Instant::now();
+        let mut activity = SpeechActivity::default();
+        activity.begin(SpeechKind::Reading, now);
+        assert!(activity.is_reading());
+        activity.observe(true, false, now + Duration::from_millis(100));
+        assert!(activity.is_reading());
+        activity.observe(true, true, now + Duration::from_millis(200));
+        assert!(!activity.is_reading());
+        activity.begin(SpeechKind::Announcement, now + Duration::from_millis(300));
+        assert!(!activity.is_reading());
+    }
+
+    #[test]
+    fn read_action_tracks_pending_speech_and_returns_to_read_during_the_tail() {
+        let now = Instant::now();
+        let mut activity = SpeechActivity::default();
+        assert_eq!(activity.read_action(), ReadAction::Read);
+        activity.begin(SpeechKind::Reading, now);
+        assert_eq!(activity.read_action(), ReadAction::Stop);
+        activity.observe(true, false, now + Duration::from_millis(100));
+        assert_eq!(activity.read_action(), ReadAction::Stop);
+        activity.observe(true, true, now + Duration::from_millis(200));
+        assert_eq!(activity.read_action(), ReadAction::Read);
+        activity.begin(SpeechKind::Announcement, now + Duration::from_millis(300));
+        assert_eq!(activity.read_action(), ReadAction::Stop);
+        activity.stop();
+        assert_eq!(activity.read_action(), ReadAction::Read);
+    }
+
+    #[test]
+    fn native_menu_updates_label_command_and_icon_together() {
+        use super::{
+            menu_icons, update_read_menu_item, wide_null, MenuGuard, IDM_EXIT, IDM_NEXT_SPEED,
+            IDM_NEXT_VOICE,
+        };
+        use windows::core::{PCWSTR, PWSTR};
+        use windows::Win32::UI::WindowsAndMessaging::*;
+
+        unsafe {
+            let menu = MenuGuard(CreatePopupMenu().unwrap());
+            let ids = [
+                ReadAction::Read.menu_item().0,
+                IDM_NEXT_SPEED,
+                IDM_NEXT_VOICE,
+                IDM_EXIT,
+            ];
+            let label = wide_null("Test");
+            for id in ids {
+                AppendMenuW(menu.0, MF_STRING, id, PCWSTR(label.as_ptr())).unwrap();
+            }
+            let icons = menu_icons::MenuIcons::install(menu.0, ids).unwrap();
+            let mut original = MENUITEMINFOW {
+                cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_BITMAP,
+                ..Default::default()
+            };
+            GetMenuItemInfoW(menu.0, 0, true, &mut original).unwrap();
+            assert_ne!(original.hbmpItem.0, 0);
+            assert_ne!(icons.read_bitmap(true), original.hbmpItem);
+            for action in [ReadAction::Stop, ReadAction::Read, ReadAction::Stop] {
+                update_read_menu_item(menu.0, action, &icons).unwrap();
+                let mut text = [0u16; 64];
+                let mut item = MENUITEMINFOW {
+                    cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                    fMask: MIIM_STRING | MIIM_ID | MIIM_BITMAP,
+                    dwTypeData: PWSTR(text.as_mut_ptr()),
+                    cch: text.len() as u32,
+                    ..Default::default()
+                };
+                GetMenuItemInfoW(menu.0, 0, true, &mut item).unwrap();
+                assert_eq!(item.wID as usize, action.menu_item().0);
+                assert_eq!(
+                    String::from_utf16_lossy(&text[..item.cch as usize]),
+                    action.menu_item().1
+                );
+                assert_eq!(item.hbmpItem, icons.read_bitmap(action == ReadAction::Stop));
+            }
+        }
     }
 
     #[test]
     fn microsoft_voice_names_are_compact() {
         assert_eq!(
             friendly_voice_name("Microsoft Ava Online (Natural)"),
-            "Microsoft Ava"
+            "MS Ava"
         );
-        assert_eq!(friendly_voice_name("Microsoft Eva Mobile"), "Microsoft Eva");
+        assert_eq!(friendly_voice_name("Microsoft Eva Mobile"), "MS Eva");
         assert_eq!(
             friendly_voice_name("Microsoft Guy(Natural) - English (United States)"),
-            "Microsoft Guy"
+            "MS Guy"
         );
     }
 
