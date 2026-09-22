@@ -1,6 +1,6 @@
 # Voxi
 
-![Voxi icon](assets/voxi.svg)
+<img src="assets/voxi-readme.svg" alt="Voxi icon" width="96" height="96">
 
 Lightweight Windows text-to-speech tray app using SAPI, with an optional private offline Narrator voice backend.
 
@@ -44,12 +44,28 @@ whether it resolves Bluetooth clipping depends on the audio device & driver.
 During the silent tail, the tray icon is idle. `Alt+1` starts the next reading
 immediately & `Alt+2` announces the new speed, replacing the remaining silence.
 
+## Install
+
+Download `voxi-*-windows-x64.zip` from
+[Releases](https://github.com/JamesMDon/Voxi/releases), extract it to a permanent
+folder, & run `Voxi.exe`. The portable package uses installed SAPI voices;
+Microsoft Guy is an optional separate download.
+
+To add Guy, exit Voxi & run this from the extracted folder:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/setup-guy.ps1
+```
+
+Each release includes a `.sha256` file. Compare its value with
+`Get-FileHash .\voxi-*-windows-x64.zip -Algorithm SHA256` before extracting.
+
 ## Build
 
 Voxi requires Windows, Rust 1.80 or newer, and the Windows SDK resource compiler.
 
 ```powershell
-cargo build --release
+cargo build --release --locked
 ```
 
 The executable is written to `target/release/Voxi.exe`.
@@ -59,7 +75,7 @@ Microsoft Guy is loaded when `runtime/natural` is installed beside `Voxi.exe`. V
 To install Guy from the adapter's official release and Microsoft's official US English voice package:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/setup-guy.ps1
+powershell -ExecutionPolicy Bypass -File scripts/setup-guy.ps1 -Destination .\target\release\runtime\natural
 ```
 
 The script verifies both downloads by SHA-256 and extracts only the 64-bit runtime files Voxi needs. The downloaded Microsoft files remain outside version control. See `THIRD_PARTY_NOTICES.md` for source and license details.
@@ -68,9 +84,21 @@ The script verifies both downloads by SHA-256 and extracts only the 64-bit runti
 
 ```powershell
 cargo fmt -- --check
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
+cargo test --all-targets --locked
+cargo clippy --all-targets --locked -- -D warnings
 ```
+
+## Releases
+
+Run `pwsh -NoProfile -File scripts/package.ps1` to build a Windows x64 ZIP &
+SHA-256 checksum in `dist/`. Packaging requires PowerShell 7 & the
+`x86_64-pc-windows-msvc` Rust target. It includes setup instructions & licenses,
+but excludes downloaded Microsoft components.
+
+Update the version in `Cargo.toml` & `Cargo.lock`, merge the change, then push a
+matching `vX.Y.Z` tag. CI checks formatting, tests, & Clippy before packaging
+that exact revision & creating a draft GitHub release. Review its notes & ZIP
+before publishing.
 
 ## License
 

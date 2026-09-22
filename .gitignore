@@ -1,4 +1,5 @@
 /target
+/dist
 /runtime/natural/
 *.exe
 *.7z
