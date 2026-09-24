@@ -22,6 +22,7 @@ enum IconKind {
     Stop,
     Speed,
     Voice,
+    Filter,
     Exit,
 }
 
@@ -38,10 +39,16 @@ impl Drop for OwnedBitmap {
 pub(crate) struct MenuIcons {
     bitmaps: [OwnedBitmap; 4],
     stop: OwnedBitmap,
+    filter: OwnedBitmap,
 }
 
 impl MenuIcons {
-    pub(crate) unsafe fn install(menu: HMENU, item_ids: [usize; 4]) -> Result<Self> {
+    /// Items are addressed by command ID; a submenu has none, so the filter icon uses its position.
+    pub(crate) unsafe fn install(
+        menu: HMENU,
+        item_ids: [usize; 4],
+        filter_position: Option<u32>,
+    ) -> Result<Self> {
         let icons = Self {
             bitmaps: [
                 create_bitmap(IconKind::Read)?,
@@ -50,13 +57,17 @@ impl MenuIcons {
                 create_bitmap(IconKind::Exit)?,
             ],
             stop: create_bitmap(IconKind::Stop)?,
+            filter: create_bitmap(IconKind::Filter)?,
         };
 
-        for (item_id, bitmap) in item_ids.into_iter().zip(&icons.bitmaps) {
+        let by_id = item_ids.into_iter().map(|id| (id as u32, false));
+        let by_position = filter_position.map(|position| (position, true));
+        let bitmaps = icons.bitmaps.iter().chain(std::iter::once(&icons.filter));
+        for ((item, is_position), bitmap) in by_id.chain(by_position).zip(bitmaps) {
             SetMenuItemInfoW(
                 menu,
-                item_id as u32,
-                false,
+                item,
+                is_position,
                 &MENUITEMINFOW {
                     cbSize: size_of::<MENUITEMINFOW>() as u32,
                     fMask: MIIM_BITMAP,
@@ -151,6 +162,10 @@ fn contains(kind: IconKind, x: f32, y: f32) -> bool {
                 || rounded_rect(x, y, 4.8, 4.5, 7.0, 11.5, 1.0)
                 || rounded_rect(x, y, 7.8, 2.5, 10.0, 13.5, 1.0)
                 || rounded_rect(x, y, 10.8, 5.5, 13.0, 10.5, 1.0)
+        }
+        IconKind::Filter => {
+            triangle(x, y, (2.0, 3.0), (14.0, 3.0), (8.0, 9.5))
+                || rounded_rect(x, y, 6.8, 8.0, 9.2, 13.5, 0.7)
         }
         IconKind::Exit => {
             distance_to_segment(x, y, 3.5, 3.5, 12.5, 12.5) <= 1.15

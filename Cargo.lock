@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "Voxi"
-version = "1.16.6"
+version = "1.17.0"
 dependencies = [
  "arboard",
  "html-escape",

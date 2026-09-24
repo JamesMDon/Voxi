@@ -18,6 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 mod menu_icons;
 mod natural;
 mod playback;
+mod settings;
 mod text;
 
 const APP_NAME: PCWSTR = w!("Voxi");
@@ -67,6 +68,14 @@ const IDM_NEXT_SPEED: usize = 2001;
 const IDM_NEXT_VOICE: usize = 2002;
 const IDM_EXIT: usize = 2003;
 const IDM_STOP: usize = 2004;
+const IDM_FILTER_STANDARD: usize = 2005;
+const IDM_FILTER_RAW: usize = 2006;
+const IDM_FILTER_CLEANUP: usize = 2007;
+const IDM_FILTER_PRONUNCIATION: usize = 2008;
+const IDM_FILTER_ABBREVIATIONS: usize = 2009;
+const IDM_FILTER_EMOJI: usize = 2010;
+// The filter submenu sits between Voice and Exit.
+const FILTER_MENU_POSITION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReadAction {
@@ -161,6 +170,7 @@ struct AppState {
     voices: Vec<VoiceChoice>,
     voice_idx: usize,
     speed_idx: usize,
+    filter_options: text::FilterOptions,
     speech: SpeechActivity,
     playback: Option<playback::Playback>,
     open_menu: Option<OpenMenu>,
@@ -308,13 +318,28 @@ fn run() -> Result<()> {
             return Err(Error::from_win32());
         }
 
-        let (voices, natural_runtime) = load_voices(SPEEDS[DEFAULT_SPEED_IDX].rate)?;
+        let preferences = settings::load();
+        let speed_idx = SPEEDS
+            .iter()
+            .position(|speed| speed.rate == preferences.speed)
+            .unwrap_or(DEFAULT_SPEED_IDX);
+        let (voices, natural_runtime) = load_voices(SPEEDS[speed_idx].rate)?;
+        let voice_idx = preferences
+            .voice_name
+            .as_deref()
+            .and_then(|preferred| {
+                voices
+                    .iter()
+                    .position(|voice| voice.name.eq_ignore_ascii_case(preferred))
+            })
+            .unwrap_or(0);
 
         STATE.with(|cell| {
             *cell.borrow_mut() = Some(AppState {
                 voices,
-                voice_idx: 0,
-                speed_idx: DEFAULT_SPEED_IDX,
+                voice_idx,
+                speed_idx,
+                filter_options: preferences.filters,
                 speech: SpeechActivity::default(),
                 playback: None,
                 open_menu: None,
@@ -486,6 +511,20 @@ unsafe extern "system" fn wnd_proc(
                 IDM_NEXT_SPEED => cycle_speed(hwnd),
                 IDM_NEXT_VOICE => cycle_voice(hwnd),
                 IDM_EXIT => request_exit(hwnd),
+                IDM_FILTER_STANDARD => set_filter_options(hwnd, |_| text::FilterOptions::STANDARD),
+                IDM_FILTER_RAW => set_filter_options(hwnd, |_| text::FilterOptions::RAW),
+                IDM_FILTER_CLEANUP => set_filter_options(hwnd, |options| {
+                    options.toggled(text::FilterCategory::Cleanup)
+                }),
+                IDM_FILTER_PRONUNCIATION => set_filter_options(hwnd, |options| {
+                    options.toggled(text::FilterCategory::Pronunciation)
+                }),
+                IDM_FILTER_ABBREVIATIONS => set_filter_options(hwnd, |options| {
+                    options.toggled(text::FilterCategory::Abbreviations)
+                }),
+                IDM_FILTER_EMOJI => {
+                    set_filter_options(hwnd, |options| options.toggled(text::FilterCategory::Emoji))
+                }
                 _ => {}
             }
             LRESULT(0)
@@ -600,6 +639,7 @@ unsafe fn cycle_voice(hwnd: HWND) {
 
         let next_idx = (state.voice_idx + 1) % state.voices.len();
         state.voice_idx = next_idx;
+        persist_settings(state);
         state.voices[next_idx]
             .engine
             .SetRate(SPEEDS[state.speed_idx].rate)
@@ -632,6 +672,7 @@ unsafe fn cycle_speed(hwnd: HWND) {
             .SetRate(speed.rate)
             .map_err(|error| error.to_string())?;
         state.speed_idx = next_idx;
+        persist_settings(state);
         if reading {
             // Guy cannot change rate mid-utterance. Resume its current word;
             // Eva applies SetRate directly. Never interrupt with an announcement.
@@ -649,13 +690,44 @@ unsafe fn cycle_speed(hwnd: HWND) {
     report_action_result(hwnd, "Could not change the speech speed", result);
 }
 
+fn set_filter_options(hwnd: HWND, change: impl FnOnce(text::FilterOptions) -> text::FilterOptions) {
+    let result = with_state(|state| {
+        state.filter_options = change(state.filter_options);
+        save_settings(state)
+    });
+    report_action_result(hwnd, "Could not save the text filters", result);
+}
+
+fn save_settings(state: &AppState) -> std::result::Result<(), String> {
+    settings::save(&settings::AppSettings {
+        voice_name: state
+            .voices
+            .get(state.voice_idx)
+            .map(|voice| voice.name.clone()),
+        speed: SPEEDS[state.speed_idx].rate,
+        filters: state.filter_options,
+    })
+    .map_err(|error| error.to_string())
+}
+
+// Voice & speed changes are frequent hotkey actions: remembering them is best effort,
+// and a read-only AppData folder must not interrupt speech with error dialogs.
+fn persist_settings(state: &AppState) {
+    let _ = save_settings(state);
+}
+
 unsafe fn speak_text_inner(
     hwnd: HWND,
     state: &mut AppState,
     value: &str,
     kind: SpeechKind,
 ) -> Result<()> {
-    let processed = text::to_plain_text(value);
+    // Announcements (voice & speed names) always use Standard so they stay natural.
+    let options = match kind {
+        SpeechKind::Reading => state.filter_options,
+        SpeechKind::Announcement => text::FilterOptions::STANDARD,
+    };
+    let processed = text::to_plain_text(value, options);
     if processed.trim().is_empty() {
         return Ok(());
     }
@@ -772,7 +844,7 @@ fn get_nid(hwnd: HWND) -> NOTIFYICONDATAW {
 
 unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
     let menu = MenuGuard(CreatePopupMenu()?);
-    let (voice_name, speed, read_action) = with_state(|state| {
+    let (voice_name, speed, read_action, filter_options) = with_state(|state| {
         let _ = refresh_speech_state(hwnd, state);
         let voice_name = state
             .voices
@@ -783,6 +855,7 @@ unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
             voice_name.replace('&', "&&"),
             SPEEDS[state.speed_idx].label,
             state.speech.read_action(),
+            state.filter_options,
         )
     })
     .unwrap_or_else(|| {
@@ -790,12 +863,14 @@ unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
             "Unavailable".to_owned(),
             SPEEDS[DEFAULT_SPEED_IDX].label,
             ReadAction::Read,
+            text::FilterOptions::STANDARD,
         )
     });
     let (read_command, read_label) = read_action.menu_item();
     let speak_wide = wide_null(read_label);
     let speed_wide = wide_null(&format!("Alt+2 | {speed}"));
     let voice_wide = wide_null(&format!("Alt+3 | {voice_name}"));
+    let filter_wide = wide_null(&format!("Filters | {}", filter_options.label()));
     let exit_wide = wide_null("Alt+4 | Exit");
 
     AppendMenuW(menu.0, MF_STRING, read_command, PCWSTR(speak_wide.as_ptr()))?;
@@ -811,11 +886,23 @@ unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
         IDM_NEXT_VOICE,
         PCWSTR(voice_wide.as_ptr()),
     )?;
+    // Once appended, the submenu belongs to the parent menu and is destroyed with it.
+    let filter_menu = create_filter_menu(filter_options)?;
+    if let Err(error) = AppendMenuW(
+        menu.0,
+        MF_POPUP,
+        filter_menu.0 as usize,
+        PCWSTR(filter_wide.as_ptr()),
+    ) {
+        let _ = DestroyMenu(filter_menu);
+        return Err(error);
+    }
     AppendMenuW(menu.0, MF_STRING, IDM_EXIT, PCWSTR(exit_wide.as_ptr()))?;
 
     let menu_icons = menu_icons::MenuIcons::install(
         menu.0,
         [read_command, IDM_NEXT_SPEED, IDM_NEXT_VOICE, IDM_EXIT],
+        Some(FILTER_MENU_POSITION),
     )?;
     update_read_menu_item(menu.0, read_action, &menu_icons)?;
 
@@ -845,6 +932,56 @@ unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
     }
     PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0))?;
     Ok(())
+}
+
+unsafe fn create_filter_menu(options: text::FilterOptions) -> Result<HMENU> {
+    let menu = CreatePopupMenu()?;
+    let items = [
+        (
+            IDM_FILTER_STANDARD,
+            "Standard | All filters",
+            options == text::FilterOptions::STANDARD,
+        ),
+        (
+            IDM_FILTER_RAW,
+            "Raw | No filters",
+            options == text::FilterOptions::RAW,
+        ),
+        (0, "", false),
+        (
+            IDM_FILTER_CLEANUP,
+            "Cleanup | Links & formatting",
+            options.is_enabled(text::FilterCategory::Cleanup),
+        ),
+        (
+            IDM_FILTER_PRONUNCIATION,
+            "Pronunciation | Names & symbols",
+            options.is_enabled(text::FilterCategory::Pronunciation),
+        ),
+        (
+            IDM_FILTER_ABBREVIATIONS,
+            "Acronyms | Expand",
+            options.is_enabled(text::FilterCategory::Abbreviations),
+        ),
+        (
+            IDM_FILTER_EMOJI,
+            "Emoji | Read aloud",
+            options.is_enabled(text::FilterCategory::Emoji),
+        ),
+    ];
+    for (id, label, checked) in items {
+        let label = wide_null(label);
+        let flags = match (id, checked) {
+            (0, _) => MF_SEPARATOR,
+            (_, true) => MF_STRING | MF_CHECKED,
+            (_, false) => MF_STRING,
+        };
+        if let Err(error) = AppendMenuW(menu, flags, id, PCWSTR(label.as_ptr())) {
+            let _ = DestroyMenu(menu);
+            return Err(error);
+        }
+    }
+    Ok(menu)
 }
 
 fn friendly_voice_name(full_name: &str) -> String {
@@ -1041,7 +1178,7 @@ mod tests {
             for id in ids {
                 AppendMenuW(menu.0, MF_STRING, id, PCWSTR(label.as_ptr())).unwrap();
             }
-            let icons = menu_icons::MenuIcons::install(menu.0, ids).unwrap();
+            let icons = menu_icons::MenuIcons::install(menu.0, ids, None).unwrap();
             let mut original = MENUITEMINFOW {
                 cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
                 fMask: MIIM_BITMAP,
@@ -1068,6 +1205,25 @@ mod tests {
                 );
                 assert_eq!(item.hbmpItem, icons.read_bitmap(action == ReadAction::Stop));
             }
+        }
+    }
+
+    #[test]
+    fn filter_menu_lists_presets_and_categories_with_checks() {
+        use super::{create_filter_menu, IDM_FILTER_EMOJI, IDM_FILTER_RAW, IDM_FILTER_STANDARD};
+        use crate::text::{FilterCategory, FilterOptions};
+        use windows::Win32::UI::WindowsAndMessaging::*;
+
+        unsafe {
+            let custom = FilterOptions::STANDARD.toggled(FilterCategory::Emoji);
+            let menu = create_filter_menu(custom).unwrap();
+            assert_eq!(GetMenuItemCount(menu), 7);
+            let checked =
+                |id: usize| GetMenuState(menu, id as u32, MF_BYCOMMAND) & MF_CHECKED.0 != 0;
+            assert!(!checked(IDM_FILTER_STANDARD));
+            assert!(!checked(IDM_FILTER_RAW));
+            assert!(!checked(IDM_FILTER_EMOJI));
+            DestroyMenu(menu).unwrap();
         }
     }
 

@@ -14,6 +14,8 @@ Lightweight Windows text-to-speech tray app using SAPI, with an optional private
 - Read Markdown content & link labels without formatting noise
 - Decode HTML entities & expand numeric multiplication and common math symbols
 - Preserve punctuation & following text when shortening URLs
+- Text filters: Standard, Raw or per-category control from the tray menu
+- Remembers voice, speed & text filters between runs
 - Queue 2 seconds of silent audio after speech to help with Bluetooth end clipping
 - Idle and speaking tray states with embedded white line icons
 - Compact native menu with transparent colored line icons
@@ -35,14 +37,29 @@ Changing speed while reading preserves your place. Eva changes speed directly;
 Guy resumes at the current word because its embedded engine cannot adjust an
 utterance already in progress. Guy may repeat that word. The speed presets are
 Slow, Mid & Fast (SAPI rates 0, 5 & 10). Speed announcements replace earlier
-announcements immediately; only clipboard readings are resumed. Voice & speed
-still reset to the startup defaults after exit.
+announcements immediately; only clipboard readings are resumed.
 
 The silent tail uses PCM audio on the same speech output for both voices. Guy's
 embedded engine ignores XML silence tags. This is an app-side workaround;
 whether it resolves Bluetooth clipping depends on the audio device & driver.
 During the silent tail, the tray icon is idle. `Alt+1` starts the next reading
 immediately & `Alt+2` announces the new speed, replacing the remaining silence.
+
+## Text filters
+
+Right-click the tray icon & open `Filters` to choose a preset or toggle categories:
+
+- `Standard` applies every filter below.
+- `Raw` reads the clipboard exactly as copied.
+- `Cleanup` shortens links, reads Markdown without formatting, decodes HTML entities &
+  drops copied UI prompts that sit on their own line.
+- `Pronunciation` fixes names & reads math symbols such as `!=`, `≤` & `2*3`.
+- `Acronyms` expands shorthand such as AFAIK & a standalone uppercase FR.
+- `Emoji` reads common emoji as words.
+
+Changing categories individually shows `Custom`. Voice & speed announcements always use
+Standard. Raw still replaces control characters & escapes XML so every voice gets valid
+input. Voxi saves the voice, speed & filters to `%APPDATA%\Voxi\settings.txt`.
 
 ## Install
 

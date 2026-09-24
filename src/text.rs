@@ -4,8 +4,101 @@ use std::borrow::Cow;
 use std::sync::LazyLock;
 
 struct Rule {
+    category: FilterCategory,
     re: Regex,
     replacement: &'static str,
+}
+
+/// Optional text filters. Raw disables all of them; whitespace normalization and
+/// XML escaping for SAPI always remain, since they keep speech input valid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FilterCategory {
+    Cleanup,
+    Pronunciation,
+    Abbreviations,
+    Emoji,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FilterOptions {
+    cleanup: bool,
+    pronunciation: bool,
+    abbreviations: bool,
+    emoji: bool,
+}
+
+impl FilterOptions {
+    const CLEANUP_MASK: u8 = 1 << 0;
+    const PRONUNCIATION_MASK: u8 = 1 << 1;
+    const ABBREVIATIONS_MASK: u8 = 1 << 2;
+    const EMOJI_MASK: u8 = 1 << 3;
+
+    pub(crate) const STANDARD: Self = Self {
+        cleanup: true,
+        pronunciation: true,
+        abbreviations: true,
+        emoji: true,
+    };
+
+    pub(crate) const RAW: Self = Self {
+        cleanup: false,
+        pronunciation: false,
+        abbreviations: false,
+        emoji: false,
+    };
+
+    /// Unknown future bits are ignored, so older builds read newer settings safely.
+    pub(crate) fn from_mask(mask: u8) -> Self {
+        Self {
+            cleanup: mask & Self::CLEANUP_MASK != 0,
+            pronunciation: mask & Self::PRONUNCIATION_MASK != 0,
+            abbreviations: mask & Self::ABBREVIATIONS_MASK != 0,
+            emoji: mask & Self::EMOJI_MASK != 0,
+        }
+    }
+
+    pub(crate) fn mask(self) -> u8 {
+        [
+            (self.cleanup, Self::CLEANUP_MASK),
+            (self.pronunciation, Self::PRONUNCIATION_MASK),
+            (self.abbreviations, Self::ABBREVIATIONS_MASK),
+            (self.emoji, Self::EMOJI_MASK),
+        ]
+        .into_iter()
+        .filter(|(enabled, _)| *enabled)
+        .fold(0, |mask, (_, bit)| mask | bit)
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        if self == Self::STANDARD {
+            "Standard"
+        } else if self == Self::RAW {
+            "Raw"
+        } else {
+            "Custom"
+        }
+    }
+
+    pub(crate) fn is_enabled(self, category: FilterCategory) -> bool {
+        match category {
+            FilterCategory::Cleanup => self.cleanup,
+            FilterCategory::Pronunciation => self.pronunciation,
+            FilterCategory::Abbreviations => self.abbreviations,
+            FilterCategory::Emoji => self.emoji,
+        }
+    }
+
+    pub(crate) fn toggled(self, category: FilterCategory) -> Self {
+        let mut next = self;
+        let flag = match category {
+            FilterCategory::Cleanup => &mut next.cleanup,
+            FilterCategory::Pronunciation => &mut next.pronunciation,
+            FilterCategory::Abbreviations => &mut next.abbreviations,
+            FilterCategory::Emoji => &mut next.emoji,
+        };
+        *flag = !*flag;
+        next
+    }
 }
 
 static MULTIPLICATION: LazyLock<Regex> = LazyLock::new(|| {
@@ -34,10 +127,12 @@ static AUTOLINK: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static DICTIONARY: LazyLock<Vec<Rule>> = LazyLock::new(|| {
+    use FilterCategory::*;
     let mut rules = Vec::new();
 
-    let mut add_regex = |pattern: &str, replacement: &'static str| {
+    let mut add_regex = |category: FilterCategory, pattern: &str, replacement: &'static str| {
         rules.push(Rule {
+            category,
             re: Regex::new(pattern).expect("Voxi dictionary patterns must be valid"),
             replacement,
         });
@@ -46,115 +141,140 @@ static DICTIONARY: LazyLock<Vec<Rule>> = LazyLock::new(|| {
     // Expand multi-character operators before the speech engine interprets
     // their punctuation one character at a time. Handle the longer JavaScript
     // form first so the != rule cannot split it.
-    add_regex(r"!==", " is not strictly equal to ");
-    add_regex(r"[\t ]*!=[\t ]*", " is not equal to ");
-    add_regex(r"[\t ]*(?:<=|≤)[\t ]*", " is less than or equal to ");
-    add_regex(r"[\t ]*(?:>=|≥)[\t ]*", " is greater than or equal to ");
-    add_regex(r"[\t ]*≠[\t ]*", " is not equal to ");
-    add_regex(r"[\t ]*≈[\t ]*", " approximately ");
-    add_regex(r"[\t ]*×[\t ]*", " times ");
-    add_regex(r"[\t ]*÷[\t ]*", " divided by ");
-    add_regex(r"[\t ]*±[\t ]*", " plus or minus ");
+    add_regex(Pronunciation, r"!==", " is not strictly equal to ");
+    add_regex(Pronunciation, r"[\t ]*!=[\t ]*", " is not equal to ");
+    add_regex(
+        Pronunciation,
+        r"[\t ]*(?:<=|≤)[\t ]*",
+        " is less than or equal to ",
+    );
+    add_regex(
+        Pronunciation,
+        r"[\t ]*(?:>=|≥)[\t ]*",
+        " is greater than or equal to ",
+    );
+    add_regex(Pronunciation, r"[\t ]*≠[\t ]*", " is not equal to ");
+    add_regex(Pronunciation, r"[\t ]*≈[\t ]*", " approximately ");
+    add_regex(Pronunciation, r"[\t ]*×[\t ]*", " times ");
+    add_regex(Pronunciation, r"[\t ]*÷[\t ]*", " divided by ");
+    add_regex(Pronunciation, r"[\t ]*±[\t ]*", " plus or minus ");
 
-    let mut add = |phrase: &str, replacement: &'static str, word_boundaries: bool| {
+    // Copied UI prompts are clutter only on their own line; mid-sentence mentions stay.
+    for prompt in [
+        "To view keyboard shortcuts, press question mark",
+        "View keyboard shortcuts",
+        "Next Reply",
+    ] {
+        add_regex(
+            Cleanup,
+            &format!(r"(?im)^[\t ]*{}[\t ]*(?:\r?\n|$)", regex::escape(prompt)),
+            "",
+        );
+    }
+
+    let mut add = |category: FilterCategory,
+                   phrase: &str,
+                   replacement: &'static str,
+                   word_boundaries: bool| {
         let pattern = if word_boundaries {
             format!(r"(?i)\b{}\b", regex::escape(phrase))
         } else {
             format!(r"(?i){}", regex::escape(phrase))
         };
         rules.push(Rule {
+            category,
             re: Regex::new(&pattern).expect("escaped Voxi dictionary patterns must be valid"),
             replacement,
         });
     };
 
-    // Longer phrases must precede their substrings.
-    add("To view keyboard shortcuts, press question mark", "", false);
-    add("View keyboard shortcuts", "", false);
-    add("Next Reply", "", false);
-    add("*", "", false);
+    add(Cleanup, "*", "", false);
 
-    add("😭", " Sob ", false);
-    add("😂", " Joy ", false);
-    add("🔥", " Fire ", false);
-    add("❤️", " Heart ", false);
-    add("👍", " Thumbs up ", false);
-    add("🎉", " Party ", false);
+    add(Emoji, "😭", " Sob ", false);
+    add(Emoji, "😂", " Joy ", false);
+    add(Emoji, "🔥", " Fire ", false);
+    add(Emoji, "❤️", " Heart ", false);
+    add(Emoji, "👍", " Thumbs up ", false);
+    add(Emoji, "🎉", " Party ", false);
 
-    add("Ableton", "Abelten", true);
-    add("AOC", "A.O.C.", true);
-    add("Aesop", "Ace-op", true);
-    add("Aes", "Ace", true);
-    add("Bastiat", "Bah-stee-aught", true);
-    add("Calendly", "Cal-endly", true);
-    add("Camus", "Camu", true);
-    add("Carrd", "Card", true);
-    add("Cerave", "CeraVee", true);
-    add("Conversion", "Convursion", true);
-    add("CopyQ", "CopyCue", true);
-    add("Cuck", "Cuhck", true);
-    add("Culinary", "Cullinary", true);
-    add("Chapo", "Chap-o", true);
-    add("Chatgpt", "ChatGPT", true);
-    add("DeSantis", "De-Santis", true);
-    add("DMing", "D-M-ing", true);
-    add("Doja", "Doeja", true);
-    add("Elgato", "El-got-o", true);
-    add("Fage", "Fa-yay", true);
-    add("Ghibli", "Jiblee", true);
-    add("Giga", "Gigga", true);
-    add("Github", "GitHub", true);
-    add("Glutes", "Glootes", true);
-    add("Goku", "Go-ku", true);
-    add("Hormozi", "Hormoezee", true);
-    add("Huberman", "Hewberman", true);
-    add("JavaScript", "Java-Script", true);
-    add("Joji", "Joegee", true);
-    add("Kasa", "Casa", true);
-    add("Kayfabe", "Kay-fabe", true);
-    add("Kimya", "Kim-ya", true);
-    add("Kobe", "Co-be", true);
-    add("LeadSynth.com", "LeadSynth dot com", false);
-    add("Leevi", "Levy", true);
-    add("Leila", "Layla", true);
-    add("Livestream", "Lyevstream", true);
-    add("Monetiz", "Mahnetiz", false);
-    add("Mozi", "Moezee", true);
-    add("Munger", "Mun-gir", true);
-    add("Pantone", "Pan-tone", true);
-    add("Paracord", "Parahcord", true);
-    add("PreCheck", "Pre-Check", true);
-    add("Rapport", "Rapore", true);
-    add("Rangeman", "Range-Man", true);
-    add("RevShare", "Rev-Share", true);
-    add("Schopenhauer", "Showpenhower", true);
-    add("Sneako", "Sneak-o", true);
-    add("Tiktok", "TikTok", true);
-    add("ToDos", "To Dos", true);
-    add("ToDo", "To Do", true);
-    add("Toup", "Tooop", true);
-    add("Upsell", "Up-sell", true);
-    add("Vegeta", "Veg-eatuh", true);
-    add("Webhook", "Web-hook", true);
-    add("Whitespace", "White-space", true);
-    add("Wordcel", "Wordcell", true);
-    add("Xmas", "Christmas", true);
-    add("Zherka", "Zerka", true);
+    add(Pronunciation, "Ableton", "Abelten", true);
+    add(Pronunciation, "AOC", "A.O.C.", true);
+    add(Pronunciation, "Aesop", "Ace-op", true);
+    add(Pronunciation, "Aes", "Ace", true);
+    add(Pronunciation, "Bastiat", "Bah-stee-aught", true);
+    add(Pronunciation, "Calendly", "Cal-endly", true);
+    add(Pronunciation, "Camus", "Camu", true);
+    add(Pronunciation, "Carrd", "Card", true);
+    add(Pronunciation, "Cerave", "CeraVee", true);
+    add(Pronunciation, "Conversion", "Convursion", true);
+    add(Pronunciation, "CopyQ", "CopyCue", true);
+    add(Pronunciation, "Cuck", "Cuhck", true);
+    add(Pronunciation, "Culinary", "Cullinary", true);
+    add(Pronunciation, "Chapo", "Chap-o", true);
+    add(Pronunciation, "Chatgpt", "ChatGPT", true);
+    add(Pronunciation, "DeSantis", "De-Santis", true);
+    add(Pronunciation, "DMing", "D-M-ing", true);
+    add(Pronunciation, "Doja", "Doeja", true);
+    add(Pronunciation, "Elgato", "El-got-o", true);
+    add(Pronunciation, "Fage", "Fa-yay", true);
+    add(Pronunciation, "Ghibli", "Jiblee", true);
+    add(Pronunciation, "Giga", "Gigga", true);
+    add(Pronunciation, "Github", "GitHub", true);
+    add(Pronunciation, "Glutes", "Glootes", true);
+    add(Pronunciation, "Goku", "Go-ku", true);
+    add(Pronunciation, "Hormozi", "Hormoezee", true);
+    add(Pronunciation, "Huberman", "Hewberman", true);
+    add(Pronunciation, "JavaScript", "Java-Script", true);
+    add(Pronunciation, "Joji", "Joegee", true);
+    add(Pronunciation, "Kasa", "Casa", true);
+    add(Pronunciation, "Kayfabe", "Kay-fabe", true);
+    add(Pronunciation, "Kimya", "Kim-ya", true);
+    add(Pronunciation, "Kobe", "Co-be", true);
+    add(Pronunciation, "LeadSynth.com", "LeadSynth dot com", false);
+    add(Pronunciation, "Leevi", "Levy", true);
+    add(Pronunciation, "Leila", "Layla", true);
+    add(Pronunciation, "Livestream", "Lyevstream", true);
+    add(Pronunciation, "Monetiz", "Mahnetiz", false);
+    add(Pronunciation, "Mozi", "Moezee", true);
+    add(Pronunciation, "Munger", "Mun-gir", true);
+    add(Pronunciation, "Pantone", "Pan-tone", true);
+    add(Pronunciation, "Paracord", "Parahcord", true);
+    add(Pronunciation, "PreCheck", "Pre-Check", true);
+    add(Pronunciation, "Rapport", "Rapore", true);
+    add(Pronunciation, "Rangeman", "Range-Man", true);
+    add(Pronunciation, "RevShare", "Rev-Share", true);
+    add(Pronunciation, "Schopenhauer", "Showpenhower", true);
+    add(Pronunciation, "Sneako", "Sneak-o", true);
+    add(Pronunciation, "Tiktok", "TikTok", true);
+    add(Pronunciation, "ToDos", "To Dos", true);
+    add(Pronunciation, "ToDo", "To Do", true);
+    add(Pronunciation, "Toup", "Tooop", true);
+    add(Pronunciation, "Upsell", "Up-sell", true);
+    add(Pronunciation, "Vegeta", "Veg-eatuh", true);
+    add(Pronunciation, "Webhook", "Web-hook", true);
+    add(Pronunciation, "Whitespace", "White-space", true);
+    add(Pronunciation, "Wordcel", "Wordcell", true);
+    add(Pronunciation, "Xmas", "Christmas", true);
+    add(Pronunciation, "Zherka", "Zerka", true);
 
-    add("AFAICT", "As far as I can tell", true);
-    add("AFAIK", "As far as I know", true);
-    add("FR", "For Real", true);
-    add("IIRC", "If I recall correctly", true);
-    add("IMO", "In my opinion", true);
-    add("SEO", "S-E-O", true);
-    add("TBQH", "To be quite honest", true);
-    add("TBH", "To be honest", true);
-    add("YC", "Y-C", true);
+    add(Abbreviations, "AFAICT", "As far as I can tell", true);
+    add(Abbreviations, "AFAIK", "As far as I know", true);
+    add(Abbreviations, "IIRC", "If I recall correctly", true);
+    add(Abbreviations, "IMO", "In my opinion", true);
+    add(Abbreviations, "SEO", "S-E-O", true);
+    add(Abbreviations, "TBQH", "To be quite honest", true);
+    add(Abbreviations, "TBH", "To be honest", true);
+    add(Abbreviations, "YC", "Y-C", true);
 
     rules
 });
 
+// Uppercase only, and not beside a dot, so "example.fr" & "fr" are left alone.
+static FR_ABBREVIATION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bFR\b").expect("Voxi FR pattern must be valid"));
+
 pub(crate) fn initialize() {
+    LazyLock::force(&FR_ABBREVIATION);
     LazyLock::force(&MULTIPLICATION);
     LazyLock::force(&WEB_URL);
     LazyLock::force(&FILE_URL);
@@ -214,8 +334,25 @@ fn markdown_text(text: &str) -> String {
     result.trim_end_matches('\n').to_owned()
 }
 
-fn preprocess_text(text: &str) -> String {
-    let decoded = html_escape::decode_html_entities(text);
+fn expand_standalone_fr(text: &str) -> Cow<'_, str> {
+    FR_ABBREVIATION.replace_all(text, |captures: &regex::Captures<'_>| {
+        let found = captures.get(0).expect("a match has a whole capture");
+        let before = text[..found.start()].chars().next_back();
+        let after = text[found.end()..].chars().next();
+        if before == Some('.') || after == Some('.') {
+            "FR".to_owned()
+        } else {
+            "For Real".to_owned()
+        }
+    })
+}
+
+fn preprocess_text(text: &str, options: FilterOptions) -> String {
+    let decoded = if options.cleanup {
+        html_escape::decode_html_entities(text)
+    } else {
+        Cow::Borrowed(text)
+    };
     let normalized: String = decoded
         .chars()
         .map(|character| match character {
@@ -228,26 +365,39 @@ fn preprocess_text(text: &str) -> String {
             c => c,
         })
         .collect();
-    let autolinks = AUTOLINK.replace_all(&normalized, "$1");
-    let files = FILE_URL.replace_all(&autolinks, |captures: &regex::Captures<'_>| {
-        format!("file{}", trailing_url_punctuation(&captures[0]))
-    });
-    let urls = WEB_URL.replace_all(&files, |captures: &regex::Captures<'_>| {
-        format!("{}{}", &captures[1], trailing_url_punctuation(&captures[0]))
-    });
-    // Expand numeric multiplication before the dictionary mutes other asterisks.
-    // Do this before Markdown too: 2*3*4 otherwise looks like emphasis.
-    let multiplied = expand_multiplication(&urls);
-    let markdown = markdown_text(&multiplied);
-    // Formatting or escaped stars can hide operands until Markdown is removed.
-    let mut processed = expand_multiplication(&markdown).into_owned();
+    let mut processed = normalized;
+    if options.cleanup {
+        let autolinks = AUTOLINK.replace_all(&processed, "$1");
+        let files = FILE_URL.replace_all(&autolinks, |captures: &regex::Captures<'_>| {
+            format!("file{}", trailing_url_punctuation(&captures[0]))
+        });
+        let urls = WEB_URL.replace_all(&files, |captures: &regex::Captures<'_>| {
+            format!("{}{}", &captures[1], trailing_url_punctuation(&captures[0]))
+        });
+        processed = urls.into_owned();
+    }
+    if options.pronunciation {
+        // Expand numeric multiplication before the dictionary mutes other asterisks.
+        // Do this before Markdown too: 2*3*4 otherwise looks like emphasis.
+        processed = expand_multiplication(&processed).into_owned();
+    }
+    if options.cleanup {
+        processed = markdown_text(&processed);
+    }
+    if options.pronunciation {
+        // Formatting or escaped stars can hide operands until Markdown is removed.
+        processed = expand_multiplication(&processed).into_owned();
+    }
     for rule in DICTIONARY.iter() {
-        if rule.re.is_match(&processed) {
+        if options.is_enabled(rule.category) && rule.re.is_match(&processed) {
             processed = rule
                 .re
                 .replace_all(&processed, rule.replacement)
                 .into_owned();
         }
+    }
+    if options.abbreviations {
+        processed = expand_standalone_fr(&processed).into_owned();
     }
     processed
 }
@@ -270,13 +420,88 @@ pub(crate) fn to_sapi_xml(processed: &str) -> String {
     format!("<speak version='1.0'>{escaped}</speak>")
 }
 
-pub(crate) fn to_plain_text(text: &str) -> String {
-    preprocess_text(text)
+pub(crate) fn to_plain_text(text: &str, options: FilterOptions) -> String {
+    preprocess_text(text, options)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{preprocess_text, to_plain_text, to_sapi_xml};
+    use super::{to_sapi_xml, FilterCategory, FilterOptions};
+
+    fn preprocess_text(text: &str) -> String {
+        super::preprocess_text(text, FilterOptions::STANDARD)
+    }
+
+    fn to_plain_text(text: &str) -> String {
+        super::to_plain_text(text, FilterOptions::STANDARD)
+    }
+
+    #[test]
+    fn raw_mode_reads_text_as_is_but_stays_xml_safe() {
+        let raw = |text| super::to_plain_text(text, FilterOptions::RAW);
+        assert_eq!(
+            raw("AFAIK <ready> **2*3** https://example.com/a 😂"),
+            "AFAIK <ready> **2*3** https://example.com/a 😂"
+        );
+        assert_eq!(raw("Tom &amp; Jerry"), "Tom &amp; Jerry");
+        assert_eq!(raw("before\0after"), "before after");
+        assert_eq!(
+            to_sapi_xml(&raw("AFAIK <ready> &")),
+            "<speak version='1.0'>AFAIK &lt;ready&gt; &amp;</speak>"
+        );
+    }
+
+    #[test]
+    fn each_category_can_be_isolated() {
+        let only = |category| FilterOptions::RAW.toggled(category);
+        let text = "AFAIK Ghibli 😂 at https://example.com/a";
+        assert_eq!(
+            super::to_plain_text(text, only(FilterCategory::Cleanup)),
+            "AFAIK Ghibli 😂 at example.com"
+        );
+        assert_eq!(
+            super::to_plain_text(text, only(FilterCategory::Pronunciation)),
+            "AFAIK Jiblee 😂 at https://example.com/a"
+        );
+        assert_eq!(
+            super::to_plain_text(text, only(FilterCategory::Abbreviations)),
+            "As far as I know Ghibli 😂 at https://example.com/a"
+        );
+        assert_eq!(
+            super::to_plain_text(text, only(FilterCategory::Emoji)),
+            "AFAIK Ghibli  Joy  at https://example.com/a"
+        );
+    }
+
+    #[test]
+    fn filter_options_label_presets_and_survive_the_settings_mask() {
+        assert_eq!(FilterOptions::STANDARD.label(), "Standard");
+        assert_eq!(FilterOptions::RAW.label(), "Raw");
+        let custom = FilterOptions::STANDARD.toggled(FilterCategory::Emoji);
+        assert_eq!(custom.label(), "Custom");
+        assert!(!custom.is_enabled(FilterCategory::Emoji));
+        assert_eq!(FilterOptions::from_mask(custom.mask()), custom);
+        assert_eq!(FilterOptions::from_mask(0xFF), FilterOptions::STANDARD);
+    }
+
+    #[test]
+    fn fr_expands_only_as_a_standalone_uppercase_word() {
+        assert_eq!(preprocess_text("FR that works"), "For Real that works");
+        assert_eq!(
+            preprocess_text("Visit example.fr today"),
+            "Visit example.fr today"
+        );
+        assert_eq!(preprocess_text("fr is lowercase"), "fr is lowercase");
+    }
+
+    #[test]
+    fn ui_prompts_are_removed_only_from_their_own_line() {
+        assert_eq!(preprocess_text("Hello\nNext Reply\nWorld"), "Hello\nWorld");
+        assert_eq!(
+            preprocess_text("Click Next Reply to continue"),
+            "Click Next Reply to continue"
+        );
+    }
 
     #[test]
     fn removes_long_keyboard_shortcut_prompt_before_shorter_rule() {
