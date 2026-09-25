@@ -18,7 +18,7 @@ impl Default for AppSettings {
         Self {
             voice_name: None,
             speed: 10,
-            filters: FilterOptions::STANDARD,
+            filters: FilterOptions::ALL,
         }
     }
 }
@@ -109,7 +109,7 @@ mod tests {
         let settings = AppSettings {
             voice_name: Some("Microsoft Eva".to_owned()),
             speed: 5,
-            filters: FilterOptions::STANDARD.toggled(FilterCategory::Emoji),
+            filters: FilterOptions::ALL.toggled(FilterCategory::Emoji),
         };
         assert_eq!(parse(&serialize(&settings)), settings);
     }
@@ -117,6 +117,6 @@ mod tests {
     #[test]
     fn filter_masks_ignore_unknown_future_bits() {
         let settings = parse("filters=255\n");
-        assert_eq!(settings.filters, FilterOptions::STANDARD);
+        assert_eq!(settings.filters, FilterOptions::ALL);
     }
 }

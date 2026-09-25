@@ -14,7 +14,7 @@ Lightweight Windows text-to-speech tray app using SAPI, with an optional private
 - Read Markdown content & link labels without formatting noise
 - Decode HTML entities & expand numeric multiplication and common math symbols
 - Preserve punctuation & following text when shortening URLs
-- Text filters: Standard, Raw or per-category control from the tray menu
+- Text filters: All, None or per-category control from the tray menu
 - Remembers voice, speed & text filters between runs
 - Queue 2 seconds of silent audio after speech to help with Bluetooth end clipping
 - Idle and speaking tray states with embedded white line icons
@@ -27,6 +27,9 @@ Lightweight Windows text-to-speech tray app using SAPI, with an optional private
 - `Alt+2` - Cycle speed
 - `Alt+3` - Cycle voice
 - `Alt+4` - Exit
+
+Voxi hotkeys do not open the foreground app's menu bar when Alt is released.
+Bare Alt still works normally.
 
 The menu shows Read while idle & Stop while speaking, including live updates
 while open. Read uses a speech bubble & Stop uses a stop square. Selecting Stop
@@ -47,18 +50,18 @@ immediately & `Alt+2` announces the new speed, replacing the remaining silence.
 
 ## Text filters
 
-Right-click the tray icon & open `Filters` to choose a preset or toggle categories:
+Right-click the tray icon & open `Filters` to toggle categories or choose a preset:
 
-- `Standard` applies every filter below.
-- `Raw` reads the clipboard exactly as copied.
 - `Cleanup` shortens links, reads Markdown without formatting, decodes HTML entities &
   drops copied UI prompts that sit on their own line.
 - `Pronunciation` fixes names & reads math symbols such as `!=`, `≤` & `2*3`.
 - `Acronyms` expands shorthand such as AFAIK & a standalone uppercase FR.
 - `Emoji` reads common emoji as words.
+- `None` reads the clipboard exactly as copied.
+- `All` applies every filter above.
 
 Changing categories individually shows `Custom`. Voice & speed announcements always use
-Standard. Raw still replaces control characters & escapes XML so every voice gets valid
+All. None still replaces control characters & escapes XML so every voice gets valid
 input. Voxi saves the voice, speed & filters to `%APPDATA%\Voxi\settings.txt`.
 
 ## Install

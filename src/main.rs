@@ -37,6 +37,8 @@ const VK_1: u32 = 0x31;
 const VK_2: u32 = 0x32;
 const VK_3: u32 = 0x33;
 const VK_4: u32 = 0x34;
+// Unassigned virtual key, the same menu mask key AutoHotkey uses by default.
+const VK_MENU_MASK: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
 
 struct Speed {
     rate: i32,
@@ -68,14 +70,15 @@ const IDM_NEXT_SPEED: usize = 2001;
 const IDM_NEXT_VOICE: usize = 2002;
 const IDM_EXIT: usize = 2003;
 const IDM_STOP: usize = 2004;
-const IDM_FILTER_STANDARD: usize = 2005;
-const IDM_FILTER_RAW: usize = 2006;
+const IDM_FILTER_ALL: usize = 2005;
+const IDM_FILTER_NONE: usize = 2006;
 const IDM_FILTER_CLEANUP: usize = 2007;
 const IDM_FILTER_PRONUNCIATION: usize = 2008;
 const IDM_FILTER_ABBREVIATIONS: usize = 2009;
 const IDM_FILTER_EMOJI: usize = 2010;
-// The filter submenu sits between Voice and Exit.
-const FILTER_MENU_POSITION: u32 = 3;
+// Filters sits on top, above a separator & the Read item.
+const FILTER_MENU_POSITION: u32 = 0;
+const READ_MENU_POSITION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReadAction {
@@ -255,7 +258,9 @@ fn with_state<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut AppState) -> R,
 {
-    STATE.with(|cell| cell.borrow_mut().as_mut().map(f))
+    // COM & shell calls made while the state is borrowed can pump messages and re-enter
+    // wnd_proc. Skip the nested message rather than panic, which aborts inside wnd_proc.
+    STATE.with(|cell| cell.try_borrow_mut().ok()?.as_mut().map(f))
 }
 
 fn main() {
@@ -466,6 +471,29 @@ unsafe fn message_loop() -> Result<()> {
     }
 }
 
+// RegisterHotKey swallows the 1-4 key, so the foreground app sees a bare Alt tap and
+// activates its menu bar when Alt is released. Tapping an unassigned key while Alt is
+// still held turns that into an Alt chord, which leaves the menu alone.
+fn mask_alt_menu() {
+    unsafe {
+        if GetAsyncKeyState(VK_MENU.0 as i32) >= 0 {
+            return;
+        }
+        let key = |flags| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_MENU_MASK,
+                    dwFlags: flags,
+                    ..Default::default()
+                },
+            },
+        };
+        let inputs = [key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)];
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -486,6 +514,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_HOTKEY => {
+            mask_alt_menu();
             match wparam.0 as i32 {
                 HK_READ => control_reading(hwnd, None),
                 HK_SPEED => cycle_speed(hwnd),
@@ -511,8 +540,8 @@ unsafe extern "system" fn wnd_proc(
                 IDM_NEXT_SPEED => cycle_speed(hwnd),
                 IDM_NEXT_VOICE => cycle_voice(hwnd),
                 IDM_EXIT => request_exit(hwnd),
-                IDM_FILTER_STANDARD => set_filter_options(hwnd, |_| text::FilterOptions::STANDARD),
-                IDM_FILTER_RAW => set_filter_options(hwnd, |_| text::FilterOptions::RAW),
+                IDM_FILTER_ALL => set_filter_options(hwnd, |_| text::FilterOptions::ALL),
+                IDM_FILTER_NONE => set_filter_options(hwnd, |_| text::FilterOptions::NONE),
                 IDM_FILTER_CLEANUP => set_filter_options(hwnd, |options| {
                     options.toggled(text::FilterCategory::Cleanup)
                 }),
@@ -722,10 +751,10 @@ unsafe fn speak_text_inner(
     value: &str,
     kind: SpeechKind,
 ) -> Result<()> {
-    // Announcements (voice & speed names) always use Standard so they stay natural.
+    // Announcements (voice & speed names) always use All so they stay natural.
     let options = match kind {
         SpeechKind::Reading => state.filter_options,
-        SpeechKind::Announcement => text::FilterOptions::STANDARD,
+        SpeechKind::Announcement => text::FilterOptions::ALL,
     };
     let processed = text::to_plain_text(value, options);
     if processed.trim().is_empty() {
@@ -785,7 +814,7 @@ unsafe fn update_read_menu_item(
     let mut text = wide_null(label);
     SetMenuItemInfoW(
         menu,
-        0,
+        READ_MENU_POSITION,
         true,
         &MENUITEMINFOW {
             cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
@@ -863,7 +892,7 @@ unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
             "Unavailable".to_owned(),
             SPEEDS[DEFAULT_SPEED_IDX].label,
             ReadAction::Read,
-            text::FilterOptions::STANDARD,
+            text::FilterOptions::ALL,
         )
     });
     let (read_command, read_label) = read_action.menu_item();
@@ -873,6 +902,18 @@ unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
     let filter_wide = wide_null(&format!("Filters | {}", filter_options.label()));
     let exit_wide = wide_null("Alt+4 | Exit");
 
+    // Once appended, the submenu belongs to the parent menu and is destroyed with it.
+    let filter_menu = create_filter_menu(filter_options)?;
+    if let Err(error) = AppendMenuW(
+        menu.0,
+        MF_POPUP,
+        filter_menu.0 as usize,
+        PCWSTR(filter_wide.as_ptr()),
+    ) {
+        let _ = DestroyMenu(filter_menu);
+        return Err(error);
+    }
+    AppendMenuW(menu.0, MF_SEPARATOR, 0, None)?;
     AppendMenuW(menu.0, MF_STRING, read_command, PCWSTR(speak_wide.as_ptr()))?;
     AppendMenuW(
         menu.0,
@@ -886,17 +927,6 @@ unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
         IDM_NEXT_VOICE,
         PCWSTR(voice_wide.as_ptr()),
     )?;
-    // Once appended, the submenu belongs to the parent menu and is destroyed with it.
-    let filter_menu = create_filter_menu(filter_options)?;
-    if let Err(error) = AppendMenuW(
-        menu.0,
-        MF_POPUP,
-        filter_menu.0 as usize,
-        PCWSTR(filter_wide.as_ptr()),
-    ) {
-        let _ = DestroyMenu(filter_menu);
-        return Err(error);
-    }
     AppendMenuW(menu.0, MF_STRING, IDM_EXIT, PCWSTR(exit_wide.as_ptr()))?;
 
     let menu_icons = menu_icons::MenuIcons::install(
@@ -936,47 +966,70 @@ unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
 
 unsafe fn create_filter_menu(options: text::FilterOptions) -> Result<HMENU> {
     let menu = CreatePopupMenu()?;
+    // Categories toggle with checkmarks; the None & All presets use radio dots.
     let items = [
         (
-            IDM_FILTER_STANDARD,
-            "Standard | All filters",
-            options == text::FilterOptions::STANDARD,
-        ),
-        (
-            IDM_FILTER_RAW,
-            "Raw | No filters",
-            options == text::FilterOptions::RAW,
-        ),
-        (0, "", false),
-        (
             IDM_FILTER_CLEANUP,
-            "Cleanup | Links & formatting",
+            "Cleanup",
             options.is_enabled(text::FilterCategory::Cleanup),
+            false,
         ),
         (
             IDM_FILTER_PRONUNCIATION,
-            "Pronunciation | Names & symbols",
+            "Pronunciation",
             options.is_enabled(text::FilterCategory::Pronunciation),
+            false,
         ),
         (
             IDM_FILTER_ABBREVIATIONS,
-            "Acronyms | Expand",
+            "Acronyms",
             options.is_enabled(text::FilterCategory::Abbreviations),
+            false,
         ),
         (
             IDM_FILTER_EMOJI,
-            "Emoji | Read aloud",
+            "Emoji",
             options.is_enabled(text::FilterCategory::Emoji),
+            false,
+        ),
+        (0, "", false, false),
+        (
+            IDM_FILTER_NONE,
+            "None",
+            options == text::FilterOptions::NONE,
+            true,
+        ),
+        (
+            IDM_FILTER_ALL,
+            "All",
+            options == text::FilterOptions::ALL,
+            true,
         ),
     ];
-    for (id, label, checked) in items {
+    for (id, label, checked, radio) in items {
         let label = wide_null(label);
         let flags = match (id, checked) {
             (0, _) => MF_SEPARATOR,
             (_, true) => MF_STRING | MF_CHECKED,
             (_, false) => MF_STRING,
         };
-        if let Err(error) = AppendMenuW(menu, flags, id, PCWSTR(label.as_ptr())) {
+        let result = AppendMenuW(menu, flags, id, PCWSTR(label.as_ptr())).and_then(|()| {
+            if !radio {
+                return Ok(());
+            }
+            SetMenuItemInfoW(
+                menu,
+                id as u32,
+                false,
+                &MENUITEMINFOW {
+                    cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                    fMask: MIIM_FTYPE,
+                    fType: MFT_RADIOCHECK,
+                    ..Default::default()
+                },
+            )
+        });
+        if let Err(error) = result {
             let _ = DestroyMenu(menu);
             return Err(error);
         }
@@ -1161,7 +1214,7 @@ mod tests {
     fn native_menu_updates_label_command_and_icon_together() {
         use super::{
             menu_icons, update_read_menu_item, wide_null, MenuGuard, IDM_EXIT, IDM_NEXT_SPEED,
-            IDM_NEXT_VOICE,
+            IDM_NEXT_VOICE, READ_MENU_POSITION,
         };
         use windows::core::{PCWSTR, PWSTR};
         use windows::Win32::UI::WindowsAndMessaging::*;
@@ -1175,6 +1228,9 @@ mod tests {
                 IDM_EXIT,
             ];
             let label = wide_null("Test");
+            // Mirror the tray menu: Filters & a separator sit above Read.
+            AppendMenuW(menu.0, MF_STRING, 1, PCWSTR(label.as_ptr())).unwrap();
+            AppendMenuW(menu.0, MF_SEPARATOR, 0, None).unwrap();
             for id in ids {
                 AppendMenuW(menu.0, MF_STRING, id, PCWSTR(label.as_ptr())).unwrap();
             }
@@ -1184,7 +1240,7 @@ mod tests {
                 fMask: MIIM_BITMAP,
                 ..Default::default()
             };
-            GetMenuItemInfoW(menu.0, 0, true, &mut original).unwrap();
+            GetMenuItemInfoW(menu.0, READ_MENU_POSITION, true, &mut original).unwrap();
             assert_ne!(original.hbmpItem.0, 0);
             assert_ne!(icons.read_bitmap(true), original.hbmpItem);
             for action in [ReadAction::Stop, ReadAction::Read, ReadAction::Stop] {
@@ -1197,7 +1253,7 @@ mod tests {
                     cch: text.len() as u32,
                     ..Default::default()
                 };
-                GetMenuItemInfoW(menu.0, 0, true, &mut item).unwrap();
+                GetMenuItemInfoW(menu.0, READ_MENU_POSITION, true, &mut item).unwrap();
                 assert_eq!(item.wID as usize, action.menu_item().0);
                 assert_eq!(
                     String::from_utf16_lossy(&text[..item.cch as usize]),
@@ -1210,19 +1266,35 @@ mod tests {
 
     #[test]
     fn filter_menu_lists_presets_and_categories_with_checks() {
-        use super::{create_filter_menu, IDM_FILTER_EMOJI, IDM_FILTER_RAW, IDM_FILTER_STANDARD};
+        use super::{
+            create_filter_menu, IDM_FILTER_ALL, IDM_FILTER_CLEANUP, IDM_FILTER_EMOJI,
+            IDM_FILTER_NONE,
+        };
         use crate::text::{FilterCategory, FilterOptions};
         use windows::Win32::UI::WindowsAndMessaging::*;
 
         unsafe {
-            let custom = FilterOptions::STANDARD.toggled(FilterCategory::Emoji);
+            let custom = FilterOptions::ALL.toggled(FilterCategory::Emoji);
             let menu = create_filter_menu(custom).unwrap();
             assert_eq!(GetMenuItemCount(menu), 7);
             let checked =
                 |id: usize| GetMenuState(menu, id as u32, MF_BYCOMMAND) & MF_CHECKED.0 != 0;
-            assert!(!checked(IDM_FILTER_STANDARD));
-            assert!(!checked(IDM_FILTER_RAW));
+            assert!(!checked(IDM_FILTER_ALL));
+            assert!(!checked(IDM_FILTER_NONE));
             assert!(!checked(IDM_FILTER_EMOJI));
+            assert_eq!(GetMenuItemID(menu, 0) as usize, IDM_FILTER_CLEANUP);
+            assert_eq!(GetMenuItemID(menu, 6) as usize, IDM_FILTER_ALL);
+            DestroyMenu(menu).unwrap();
+
+            let menu = create_filter_menu(FilterOptions::ALL).unwrap();
+            let mut item = MENUITEMINFOW {
+                cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_FTYPE | MIIM_STATE,
+                ..Default::default()
+            };
+            GetMenuItemInfoW(menu, IDM_FILTER_ALL as u32, false, &mut item).unwrap();
+            assert_ne!(item.fType & MFT_RADIOCHECK, MENU_ITEM_TYPE(0));
+            assert_ne!(item.fState & MFS_CHECKED, MENU_ITEM_STATE(0));
             DestroyMenu(menu).unwrap();
         }
     }

@@ -9,7 +9,7 @@ struct Rule {
     replacement: &'static str,
 }
 
-/// Optional text filters. Raw disables all of them; whitespace normalization and
+/// Optional text filters. None disables all of them; whitespace normalization and
 /// XML escaping for SAPI always remain, since they keep speech input valid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FilterCategory {
@@ -33,14 +33,14 @@ impl FilterOptions {
     const ABBREVIATIONS_MASK: u8 = 1 << 2;
     const EMOJI_MASK: u8 = 1 << 3;
 
-    pub(crate) const STANDARD: Self = Self {
+    pub(crate) const ALL: Self = Self {
         cleanup: true,
         pronunciation: true,
         abbreviations: true,
         emoji: true,
     };
 
-    pub(crate) const RAW: Self = Self {
+    pub(crate) const NONE: Self = Self {
         cleanup: false,
         pronunciation: false,
         abbreviations: false,
@@ -70,10 +70,10 @@ impl FilterOptions {
     }
 
     pub(crate) fn label(self) -> &'static str {
-        if self == Self::STANDARD {
-            "Standard"
-        } else if self == Self::RAW {
-            "Raw"
+        if self == Self::ALL {
+            "All"
+        } else if self == Self::NONE {
+            "None"
         } else {
             "Custom"
         }
@@ -429,16 +429,16 @@ mod tests {
     use super::{to_sapi_xml, FilterCategory, FilterOptions};
 
     fn preprocess_text(text: &str) -> String {
-        super::preprocess_text(text, FilterOptions::STANDARD)
+        super::preprocess_text(text, FilterOptions::ALL)
     }
 
     fn to_plain_text(text: &str) -> String {
-        super::to_plain_text(text, FilterOptions::STANDARD)
+        super::to_plain_text(text, FilterOptions::ALL)
     }
 
     #[test]
-    fn raw_mode_reads_text_as_is_but_stays_xml_safe() {
-        let raw = |text| super::to_plain_text(text, FilterOptions::RAW);
+    fn no_filters_read_text_as_is_but_stays_xml_safe() {
+        let raw = |text| super::to_plain_text(text, FilterOptions::NONE);
         assert_eq!(
             raw("AFAIK <ready> **2*3** https://example.com/a 😂"),
             "AFAIK <ready> **2*3** https://example.com/a 😂"
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn each_category_can_be_isolated() {
-        let only = |category| FilterOptions::RAW.toggled(category);
+        let only = |category| FilterOptions::NONE.toggled(category);
         let text = "AFAIK Ghibli 😂 at https://example.com/a";
         assert_eq!(
             super::to_plain_text(text, only(FilterCategory::Cleanup)),
@@ -475,13 +475,13 @@ mod tests {
 
     #[test]
     fn filter_options_label_presets_and_survive_the_settings_mask() {
-        assert_eq!(FilterOptions::STANDARD.label(), "Standard");
-        assert_eq!(FilterOptions::RAW.label(), "Raw");
-        let custom = FilterOptions::STANDARD.toggled(FilterCategory::Emoji);
+        assert_eq!(FilterOptions::ALL.label(), "All");
+        assert_eq!(FilterOptions::NONE.label(), "None");
+        let custom = FilterOptions::ALL.toggled(FilterCategory::Emoji);
         assert_eq!(custom.label(), "Custom");
         assert!(!custom.is_enabled(FilterCategory::Emoji));
         assert_eq!(FilterOptions::from_mask(custom.mask()), custom);
-        assert_eq!(FilterOptions::from_mask(0xFF), FilterOptions::STANDARD);
+        assert_eq!(FilterOptions::from_mask(0xFF), FilterOptions::ALL);
     }
 
     #[test]
