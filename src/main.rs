@@ -10,16 +10,19 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Media::Speech::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+mod hotkeys;
 mod menu_icons;
 mod natural;
 mod playback;
 mod settings;
+mod startup;
 mod text;
+mod words;
 
 const APP_NAME: PCWSTR = w!("Voxi");
 const APP_CLASS: PCWSTR = w!("Voxi_Class");
@@ -27,18 +30,7 @@ const APP_MUTEX: PCWSTR = w!("Local\\Voxi.SingleInstance");
 const APP_ICON_ACTIVE_ID: usize = 1;
 const APP_ICON_IDLE_ID: usize = 2;
 
-const HK_READ: i32 = 1;
-const HK_SPEED: i32 = 2;
-const HK_VOICE: i32 = 3;
-const HK_EXIT: i32 = 4;
-const HOTKEY_IDS: [i32; 4] = [HK_READ, HK_SPEED, HK_VOICE, HK_EXIT];
-
-const VK_1: u32 = 0x31;
-const VK_2: u32 = 0x32;
-const VK_3: u32 = 0x33;
-const VK_4: u32 = 0x34;
-// Unassigned virtual key, the same menu mask key AutoHotkey uses by default.
-const VK_MENU_MASK: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
+use hotkeys::{HK_EXIT, HK_READ, HK_SPEED, HK_VOICE};
 
 struct Speed {
     rate: i32,
@@ -76,9 +68,14 @@ const IDM_FILTER_CLEANUP: usize = 2007;
 const IDM_FILTER_PRONUNCIATION: usize = 2008;
 const IDM_FILTER_ABBREVIATIONS: usize = 2009;
 const IDM_FILTER_EMOJI: usize = 2010;
-// Filters sits on top, above a separator & the Read item.
+const IDM_START_WITH_WINDOWS: usize = 2011;
+const IDM_EDIT_WORDS: usize = 2012;
+// One command per hotkey preset, in hotkeys::Modifier::ALL order.
+const IDM_HOTKEYS_FIRST: usize = 2020;
+// Filters & Options sit on top, above a separator & the Read item.
 const FILTER_MENU_POSITION: u32 = 0;
-const READ_MENU_POSITION: u32 = 2;
+const OPTIONS_MENU_POSITION: u32 = 1;
+const READ_MENU_POSITION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReadAction {
@@ -89,9 +86,13 @@ enum ReadAction {
 impl ReadAction {
     fn menu_item(self) -> (usize, &'static str) {
         match self {
-            Self::Read => (IDM_READ, "Alt+1 | Read"),
-            Self::Stop => (IDM_STOP, "Alt+1 | Stop"),
+            Self::Read => (IDM_READ, "Read"),
+            Self::Stop => (IDM_STOP, "Stop"),
         }
+    }
+
+    fn menu_label(self, hotkeys: hotkeys::Modifier) -> String {
+        format!("{}+1 | {}", hotkeys.label(), self.menu_item().1)
     }
 }
 
@@ -174,6 +175,8 @@ struct AppState {
     voice_idx: usize,
     speed_idx: usize,
     filter_options: text::FilterOptions,
+    hotkeys: hotkeys::Modifier,
+    words: words::Words,
     speech: SpeechActivity,
     playback: Option<playback::Playback>,
     open_menu: Option<OpenMenu>,
@@ -264,6 +267,7 @@ where
 }
 
 fn main() {
+    log_panics();
     if let Err(error) = run() {
         show_message(
             None,
@@ -272,6 +276,42 @@ fn main() {
             MB_OK | MB_ICONERROR,
         );
     }
+}
+
+// Voxi has no console & a panic inside wnd_proc aborts, so keep the panic message &
+// location in %APPDATA%\Voxi\crash.log. Once the log passes 64 KB it starts over.
+fn log_panics() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(path) = settings::data_path("crash.log") {
+            let time = unsafe { GetLocalTime() };
+            let entry = format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02} Voxi {}: {info}\n",
+                time.wYear,
+                time.wMonth,
+                time.wDay,
+                time.wHour,
+                time.wMinute,
+                time.wSecond,
+                env!("CARGO_PKG_VERSION"),
+            );
+            let append = std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() < 64 * 1024);
+            let _ = path
+                .parent()
+                .map(std::fs::create_dir_all)
+                .transpose()
+                .and_then(|_| {
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .append(append)
+                        .truncate(!append)
+                        .open(&path)
+                })
+                .and_then(|mut file| std::io::Write::write_all(&mut file, entry.as_bytes()));
+        }
+        default_hook(info);
+    }));
 }
 
 fn run() -> Result<()> {
@@ -345,6 +385,8 @@ fn run() -> Result<()> {
                 voice_idx,
                 speed_idx,
                 filter_options: preferences.filters,
+                hotkeys: preferences.hotkeys,
+                words: words::Words::default(),
                 speech: SpeechActivity::default(),
                 playback: None,
                 open_menu: None,
@@ -356,23 +398,26 @@ fn run() -> Result<()> {
         });
         let _state_guard = StateGuard;
 
-        let modifiers = MOD_ALT | MOD_NOREPEAT;
-        RegisterHotKey(hwnd, HK_READ, modifiers, VK_1)?;
-        RegisterHotKey(hwnd, HK_SPEED, modifiers, VK_2)?;
-        RegisterHotKey(hwnd, HK_VOICE, modifiers, VK_3)?;
-        RegisterHotKey(hwnd, HK_EXIT, modifiers, VK_4)?;
+        // A clash keeps Voxi running so another preset can be chosen from the tray.
+        let hotkey_error = hotkeys::register(hwnd, preferences.hotkeys).err();
 
         if SetTimer(hwnd, ID_TIMER_CHECK, 100, None) == 0 {
             return Err(Error::from_win32());
         }
 
         with_state(|state| init_tray(hwnd, state)).transpose()?;
+        if let Some(error) = hotkey_error {
+            show_message(
+                Some(hwnd),
+                "Voxi hotkeys are off",
+                &format!("{error}\n\nChoose other hotkeys from the tray menu: Options, Hotkeys."),
+                MB_OK | MB_ICONWARNING,
+            );
+        }
         let loop_result = message_loop();
 
         let _ = KillTimer(hwnd, ID_TIMER_CHECK);
-        for id in HOTKEY_IDS {
-            let _ = UnregisterHotKey(hwnd, id);
-        }
+        hotkeys::unregister(hwnd);
         let _ = Shell_NotifyIconW(NIM_DELETE, &get_nid(hwnd));
 
         loop_result
@@ -471,29 +516,6 @@ unsafe fn message_loop() -> Result<()> {
     }
 }
 
-// RegisterHotKey swallows the 1-4 key, so the foreground app sees a bare Alt tap and
-// activates its menu bar when Alt is released. Tapping an unassigned key while Alt is
-// still held turns that into an Alt chord, which leaves the menu alone.
-fn mask_alt_menu() {
-    unsafe {
-        if GetAsyncKeyState(VK_MENU.0 as i32) >= 0 {
-            return;
-        }
-        let key = |flags| INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VK_MENU_MASK,
-                    dwFlags: flags,
-                    ..Default::default()
-                },
-            },
-        };
-        let inputs = [key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)];
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-    }
-}
-
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -514,7 +536,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_HOTKEY => {
-            mask_alt_menu();
+            hotkeys::mask_alt_menu();
             match wparam.0 as i32 {
                 HK_READ => control_reading(hwnd, None),
                 HK_SPEED => cycle_speed(hwnd),
@@ -553,6 +575,13 @@ unsafe extern "system" fn wnd_proc(
                 }),
                 IDM_FILTER_EMOJI => {
                     set_filter_options(hwnd, |options| options.toggled(text::FilterCategory::Emoji))
+                }
+                IDM_START_WITH_WINDOWS => toggle_start_with_windows(hwnd),
+                IDM_EDIT_WORDS => edit_words(hwnd),
+                id if (IDM_HOTKEYS_FIRST..IDM_HOTKEYS_FIRST + hotkeys::Modifier::ALL.len())
+                    .contains(&id) =>
+                {
+                    set_hotkeys(hwnd, hotkeys::Modifier::ALL[id - IDM_HOTKEYS_FIRST])
                 }
                 _ => {}
             }
@@ -727,6 +756,61 @@ fn set_filter_options(hwnd: HWND, change: impl FnOnce(text::FilterOptions) -> te
     report_action_result(hwnd, "Could not save the text filters", result);
 }
 
+fn toggle_start_with_windows(hwnd: HWND) {
+    let result = startup::set_enabled(!startup::is_enabled()).map_err(|error| error.to_string());
+    report_action_result(hwnd, "Could not change Start with Windows", Some(result));
+}
+
+unsafe fn set_hotkeys(hwnd: HWND, modifier: hotkeys::Modifier) {
+    let result = with_state(|state| {
+        // Re-registering the current preset retries it after a clash at startup.
+        hotkeys::unregister(hwnd);
+        if let Err(error) = hotkeys::register(hwnd, modifier) {
+            let _ = hotkeys::register(hwnd, state.hotkeys);
+            return Err(error);
+        }
+        state.hotkeys = modifier;
+        save_settings(state)
+    });
+    report_action_result(hwnd, "Could not change the hotkeys", result);
+}
+
+unsafe fn edit_words(hwnd: HWND) {
+    let result = words::ensure_file()
+        .map_err(|error| error.to_string())
+        .and_then(|path| {
+            let file = wide_null(&path.to_string_lossy());
+            let opened = ShellExecuteW(
+                hwnd,
+                w!("open"),
+                PCWSTR(file.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            );
+            // ShellExecute reports success with values above 32. Without a .txt
+            // association, fall back to Notepad.
+            if opened.0 > 32 {
+                return Ok(());
+            }
+            let argument = wide_null(&format!("\"{}\"", path.to_string_lossy()));
+            let notepad = ShellExecuteW(
+                hwnd,
+                w!("open"),
+                w!("notepad.exe"),
+                PCWSTR(argument.as_ptr()),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            );
+            if notepad.0 > 32 {
+                Ok(())
+            } else {
+                Err(Error::from_win32().to_string())
+            }
+        });
+    report_action_result(hwnd, "Could not open the words file", Some(result));
+}
+
 fn save_settings(state: &AppState) -> std::result::Result<(), String> {
     settings::save(&settings::AppSettings {
         voice_name: state
@@ -735,6 +819,7 @@ fn save_settings(state: &AppState) -> std::result::Result<(), String> {
             .map(|voice| voice.name.clone()),
         speed: SPEEDS[state.speed_idx].rate,
         filters: state.filter_options,
+        hotkeys: state.hotkeys,
     })
     .map_err(|error| error.to_string())
 }
@@ -756,6 +841,7 @@ unsafe fn speak_text_inner(
         SpeechKind::Reading => state.filter_options,
         SpeechKind::Announcement => text::FilterOptions::ALL,
     };
+    state.words.refresh();
     let processed = text::to_plain_text(value, options);
     if processed.trim().is_empty() {
         return Ok(());
@@ -796,7 +882,12 @@ unsafe fn speak_processed_text(
 
 unsafe fn update_tray(hwnd: HWND, state: &AppState) -> Result<()> {
     if let Some(menu) = &state.open_menu {
-        update_read_menu_item(menu.handle, state.speech.read_action(), &menu.icons)?;
+        update_read_menu_item(
+            menu.handle,
+            state.speech.read_action(),
+            state.hotkeys,
+            &menu.icons,
+        )?;
         let _ = DrawMenuBar(hwnd);
     }
     let mut nid = get_nid(hwnd);
@@ -808,10 +899,11 @@ unsafe fn update_tray(hwnd: HWND, state: &AppState) -> Result<()> {
 unsafe fn update_read_menu_item(
     menu: HMENU,
     action: ReadAction,
+    hotkeys: hotkeys::Modifier,
     icons: &menu_icons::MenuIcons,
 ) -> Result<()> {
-    let (command, label) = action.menu_item();
-    let mut text = wide_null(label);
+    let command = action.menu_item().0;
+    let mut text = wide_null(&action.menu_label(hotkeys));
     SetMenuItemInfoW(
         menu,
         READ_MENU_POSITION,
@@ -873,7 +965,7 @@ fn get_nid(hwnd: HWND) -> NOTIFYICONDATAW {
 
 unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
     let menu = MenuGuard(CreatePopupMenu()?);
-    let (voice_name, speed, read_action, filter_options) = with_state(|state| {
+    let (voice_name, speed, read_action, filter_options, hotkeys) = with_state(|state| {
         let _ = refresh_speech_state(hwnd, state);
         let voice_name = state
             .voices
@@ -885,6 +977,7 @@ unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
             SPEEDS[state.speed_idx].label,
             state.speech.read_action(),
             state.filter_options,
+            state.hotkeys,
         )
     })
     .unwrap_or_else(|| {
@@ -893,48 +986,40 @@ unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
             SPEEDS[DEFAULT_SPEED_IDX].label,
             ReadAction::Read,
             text::FilterOptions::ALL,
+            hotkeys::Modifier::default(),
         )
     });
-    let (read_command, read_label) = read_action.menu_item();
-    let speak_wide = wide_null(read_label);
-    let speed_wide = wide_null(&format!("Alt+2 | {speed}"));
-    let voice_wide = wide_null(&format!("Alt+3 | {voice_name}"));
-    let filter_wide = wide_null(&format!("Filters | {}", filter_options.label()));
-    let exit_wide = wide_null("Alt+4 | Exit");
+    let modifier = hotkeys.label();
+    let read_command = read_action.menu_item().0;
+    let items = [
+        (read_command, read_action.menu_label(hotkeys)),
+        (IDM_NEXT_SPEED, format!("{modifier}+2 | {speed}")),
+        (IDM_NEXT_VOICE, format!("{modifier}+3 | {voice_name}")),
+        (IDM_EXIT, format!("{modifier}+4 | Exit")),
+    ];
 
-    // Once appended, the submenu belongs to the parent menu and is destroyed with it.
-    let filter_menu = create_filter_menu(filter_options)?;
-    if let Err(error) = AppendMenuW(
+    append_submenu(
         menu.0,
-        MF_POPUP,
-        filter_menu.0 as usize,
-        PCWSTR(filter_wide.as_ptr()),
-    ) {
-        let _ = DestroyMenu(filter_menu);
-        return Err(error);
-    }
+        &format!("Filters | {}", filter_options.label()),
+        create_filter_menu(filter_options),
+    )?;
+    append_submenu(
+        menu.0,
+        "Options",
+        create_options_menu(hotkeys, startup::is_enabled()),
+    )?;
     AppendMenuW(menu.0, MF_SEPARATOR, 0, None)?;
-    AppendMenuW(menu.0, MF_STRING, read_command, PCWSTR(speak_wide.as_ptr()))?;
-    AppendMenuW(
-        menu.0,
-        MF_STRING,
-        IDM_NEXT_SPEED,
-        PCWSTR(speed_wide.as_ptr()),
-    )?;
-    AppendMenuW(
-        menu.0,
-        MF_STRING,
-        IDM_NEXT_VOICE,
-        PCWSTR(voice_wide.as_ptr()),
-    )?;
-    AppendMenuW(menu.0, MF_STRING, IDM_EXIT, PCWSTR(exit_wide.as_ptr()))?;
+    for (id, label) in &items {
+        let label = wide_null(label);
+        AppendMenuW(menu.0, MF_STRING, *id, PCWSTR(label.as_ptr()))?;
+    }
 
     let menu_icons = menu_icons::MenuIcons::install(
         menu.0,
-        [read_command, IDM_NEXT_SPEED, IDM_NEXT_VOICE, IDM_EXIT],
-        Some(FILTER_MENU_POSITION),
+        items.map(|(id, _)| id),
+        Some((FILTER_MENU_POSITION, OPTIONS_MENU_POSITION)),
     )?;
-    update_read_menu_item(menu.0, read_action, &menu_icons)?;
+    update_read_menu_item(menu.0, read_action, hotkeys, &menu_icons)?;
 
     let mut point = POINT::default();
     GetCursorPos(&mut point)?;
@@ -964,10 +1049,12 @@ unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
     Ok(())
 }
 
+// Menu rows: (command, label, checked, radio). Command 0 is a separator.
+type MenuRow<'a> = (usize, &'a str, bool, bool);
+
 unsafe fn create_filter_menu(options: text::FilterOptions) -> Result<HMENU> {
-    let menu = CreatePopupMenu()?;
     // Categories toggle with checkmarks; the None & All presets use radio dots.
-    let items = [
+    let rows: [MenuRow; 7] = [
         (
             IDM_FILTER_CLEANUP,
             "Cleanup",
@@ -1006,17 +1093,85 @@ unsafe fn create_filter_menu(options: text::FilterOptions) -> Result<HMENU> {
             true,
         ),
     ];
-    for (id, label, checked, radio) in items {
+    build_menu(|menu| append_rows(menu, &rows))
+}
+
+unsafe fn create_options_menu(
+    hotkeys: hotkeys::Modifier,
+    start_with_windows: bool,
+) -> Result<HMENU> {
+    build_menu(|menu| {
+        append_rows(
+            menu,
+            &[(
+                IDM_START_WITH_WINDOWS,
+                "Start with Windows",
+                start_with_windows,
+                false,
+            )],
+        )?;
+        append_submenu(
+            menu,
+            &format!("Hotkeys | {}", hotkeys.label()),
+            create_hotkey_menu(hotkeys),
+        )?;
+        append_rows(
+            menu,
+            &[
+                (0, "", false, false),
+                (IDM_EDIT_WORDS, "Edit words…", false, false),
+            ],
+        )
+    })
+}
+
+unsafe fn create_hotkey_menu(current: hotkeys::Modifier) -> Result<HMENU> {
+    let rows: Vec<MenuRow> = hotkeys::Modifier::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(index, modifier)| {
+            (
+                IDM_HOTKEYS_FIRST + index,
+                modifier.label(),
+                modifier == current,
+                true,
+            )
+        })
+        .collect();
+    build_menu(|menu| append_rows(menu, &rows))
+}
+
+/// Creates a popup menu and destroys it again if filling it fails.
+unsafe fn build_menu(fill: impl FnOnce(HMENU) -> Result<()>) -> Result<HMENU> {
+    let menu = CreatePopupMenu()?;
+    if let Err(error) = fill(menu) {
+        let _ = DestroyMenu(menu);
+        return Err(error);
+    }
+    Ok(menu)
+}
+
+// Once appended, a submenu belongs to its parent and is destroyed with it.
+unsafe fn append_submenu(parent: HMENU, label: &str, submenu: Result<HMENU>) -> Result<()> {
+    let submenu = submenu?;
+    let label = wide_null(label);
+    let result = AppendMenuW(parent, MF_POPUP, submenu.0 as usize, PCWSTR(label.as_ptr()));
+    if result.is_err() {
+        let _ = DestroyMenu(submenu);
+    }
+    result
+}
+
+unsafe fn append_rows(menu: HMENU, rows: &[MenuRow]) -> Result<()> {
+    for &(id, label, checked, radio) in rows {
         let label = wide_null(label);
         let flags = match (id, checked) {
             (0, _) => MF_SEPARATOR,
             (_, true) => MF_STRING | MF_CHECKED,
             (_, false) => MF_STRING,
         };
-        let result = AppendMenuW(menu, flags, id, PCWSTR(label.as_ptr())).and_then(|()| {
-            if !radio {
-                return Ok(());
-            }
+        AppendMenuW(menu, flags, id, PCWSTR(label.as_ptr()))?;
+        if radio {
             SetMenuItemInfoW(
                 menu,
                 id as u32,
@@ -1027,14 +1182,10 @@ unsafe fn create_filter_menu(options: text::FilterOptions) -> Result<HMENU> {
                     fType: MFT_RADIOCHECK,
                     ..Default::default()
                 },
-            )
-        });
-        if let Err(error) = result {
-            let _ = DestroyMenu(menu);
-            return Err(error);
+            )?;
         }
     }
-    Ok(menu)
+    Ok(())
 }
 
 fn friendly_voice_name(full_name: &str) -> String {
@@ -1216,6 +1367,7 @@ mod tests {
             menu_icons, update_read_menu_item, wide_null, MenuGuard, IDM_EXIT, IDM_NEXT_SPEED,
             IDM_NEXT_VOICE, READ_MENU_POSITION,
         };
+        use crate::hotkeys::Modifier;
         use windows::core::{PCWSTR, PWSTR};
         use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -1228,8 +1380,9 @@ mod tests {
                 IDM_EXIT,
             ];
             let label = wide_null("Test");
-            // Mirror the tray menu: Filters & a separator sit above Read.
+            // Mirror the tray menu: Filters, Options & a separator sit above Read.
             AppendMenuW(menu.0, MF_STRING, 1, PCWSTR(label.as_ptr())).unwrap();
+            AppendMenuW(menu.0, MF_STRING, 2, PCWSTR(label.as_ptr())).unwrap();
             AppendMenuW(menu.0, MF_SEPARATOR, 0, None).unwrap();
             for id in ids {
                 AppendMenuW(menu.0, MF_STRING, id, PCWSTR(label.as_ptr())).unwrap();
@@ -1244,7 +1397,7 @@ mod tests {
             assert_ne!(original.hbmpItem.0, 0);
             assert_ne!(icons.read_bitmap(true), original.hbmpItem);
             for action in [ReadAction::Stop, ReadAction::Read, ReadAction::Stop] {
-                update_read_menu_item(menu.0, action, &icons).unwrap();
+                update_read_menu_item(menu.0, action, Modifier::CtrlAlt, &icons).unwrap();
                 let mut text = [0u16; 64];
                 let mut item = MENUITEMINFOW {
                     cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
@@ -1257,7 +1410,7 @@ mod tests {
                 assert_eq!(item.wID as usize, action.menu_item().0);
                 assert_eq!(
                     String::from_utf16_lossy(&text[..item.cch as usize]),
-                    action.menu_item().1
+                    format!("Ctrl+Alt+1 | {}", action.menu_item().1)
                 );
                 assert_eq!(item.hbmpItem, icons.read_bitmap(action == ReadAction::Stop));
             }
@@ -1295,6 +1448,34 @@ mod tests {
             GetMenuItemInfoW(menu, IDM_FILTER_ALL as u32, false, &mut item).unwrap();
             assert_ne!(item.fType & MFT_RADIOCHECK, MENU_ITEM_TYPE(0));
             assert_ne!(item.fState & MFS_CHECKED, MENU_ITEM_STATE(0));
+            DestroyMenu(menu).unwrap();
+        }
+    }
+
+    #[test]
+    fn options_menu_shows_startup_hotkey_presets_and_words() {
+        use super::{
+            create_options_menu, IDM_EDIT_WORDS, IDM_HOTKEYS_FIRST, IDM_START_WITH_WINDOWS,
+        };
+        use crate::hotkeys::Modifier;
+        use windows::Win32::UI::WindowsAndMessaging::*;
+
+        unsafe {
+            let menu = create_options_menu(Modifier::CtrlAlt, true).unwrap();
+            assert_eq!(GetMenuItemCount(menu), 4);
+            assert_eq!(GetMenuItemID(menu, 0) as usize, IDM_START_WITH_WINDOWS);
+            assert_ne!(
+                GetMenuState(menu, IDM_START_WITH_WINDOWS as u32, MF_BYCOMMAND) & MF_CHECKED.0,
+                0
+            );
+            assert_eq!(GetMenuItemID(menu, 3) as usize, IDM_EDIT_WORDS);
+
+            let presets = GetSubMenu(menu, 1);
+            assert_eq!(GetMenuItemCount(presets), Modifier::ALL.len() as i32);
+            for (index, modifier) in Modifier::ALL.into_iter().enumerate() {
+                let state = GetMenuState(presets, (IDM_HOTKEYS_FIRST + index) as u32, MF_BYCOMMAND);
+                assert_eq!(state & MF_CHECKED.0 != 0, modifier == Modifier::CtrlAlt);
+            }
             DestroyMenu(menu).unwrap();
         }
     }

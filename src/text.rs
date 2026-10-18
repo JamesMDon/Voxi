@@ -1,12 +1,54 @@
 use pulldown_cmark::{Event, Parser, TagEnd};
 use regex::Regex;
 use std::borrow::Cow;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, RwLock};
 
 struct Rule {
     category: FilterCategory,
     re: Regex,
     replacement: &'static str,
+}
+
+/// A pronunciation from the user's words file, applied before the built-in dictionary.
+struct CustomWord {
+    re: Regex,
+    replacement: String,
+}
+
+static CUSTOM_WORDS: RwLock<Vec<CustomWord>> = RwLock::new(Vec::new());
+
+pub(crate) fn set_custom_words(words: &[(String, String)]) {
+    let compiled = compile_custom_words(words);
+    *CUSTOM_WORDS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = compiled;
+}
+
+fn compile_custom_words(words: &[(String, String)]) -> Vec<CustomWord> {
+    let mut words: Vec<_> = words.iter().collect();
+    // Longer phrases first, so "Studio Ghibli" wins over a separate "Ghibli" entry.
+    words.sort_by_key(|(written, _)| std::cmp::Reverse(written.chars().count()));
+    words
+        .into_iter()
+        .filter_map(|(written, spoken)| {
+            // \b only works beside word characters, so entries like C++ skip it at that end.
+            let boundary = |character: Option<char>| match character {
+                Some(c) if c.is_alphanumeric() || c == '_' => r"\b",
+                _ => "",
+            };
+            let pattern = format!(
+                "(?i){}{}{}",
+                boundary(written.chars().next()),
+                regex::escape(written),
+                boundary(written.chars().last())
+            );
+            let re = Regex::new(&pattern).ok()?;
+            Some(CustomWord {
+                re,
+                replacement: spoken.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Optional text filters. None disables all of them; whitespace normalization and
@@ -348,6 +390,17 @@ fn expand_standalone_fr(text: &str) -> Cow<'_, str> {
 }
 
 fn preprocess_text(text: &str, options: FilterOptions) -> String {
+    let custom_words = CUSTOM_WORDS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    preprocess_with_words(text, options, &custom_words)
+}
+
+fn preprocess_with_words(
+    text: &str,
+    options: FilterOptions,
+    custom_words: &[CustomWord],
+) -> String {
     let decoded = if options.cleanup {
         html_escape::decode_html_entities(text)
     } else {
@@ -387,6 +440,15 @@ fn preprocess_text(text: &str, options: FilterOptions) -> String {
     if options.pronunciation {
         // Formatting or escaped stars can hide operands until Markdown is removed.
         processed = expand_multiplication(&processed).into_owned();
+        // User entries run first so they can override the built-in dictionary.
+        for word in custom_words {
+            if word.re.is_match(&processed) {
+                processed = word
+                    .re
+                    .replace_all(&processed, regex::NoExpand(&word.replacement))
+                    .into_owned();
+            }
+        }
     }
     for rule in DICTIONARY.iter() {
         if options.is_enabled(rule.category) && rule.re.is_match(&processed) {
@@ -471,6 +533,26 @@ mod tests {
             super::to_plain_text(text, only(FilterCategory::Emoji)),
             "AFAIK Ghibli  Joy  at https://example.com/a"
         );
+    }
+
+    #[test]
+    fn custom_words_match_whole_words_longest_first_and_override_builtins() {
+        let words = super::compile_custom_words(&[
+            ("Ghibli".to_owned(), "Ghee-blee".to_owned()),
+            ("Studio Ghibli".to_owned(), "the studio".to_owned()),
+            ("C++".to_owned(), "C plus plus".to_owned()),
+            ("cost".to_owned(), "$5".to_owned()),
+        ]);
+        let read = |text, options| super::preprocess_with_words(text, options, &words);
+        assert_eq!(
+            read(
+                "Studio Ghibli & ghibli, not Ghiblis. C++ cost",
+                FilterOptions::ALL
+            ),
+            "the studio & Ghee-blee, not Ghiblis. C plus plus $5"
+        );
+        let without = FilterOptions::ALL.toggled(FilterCategory::Pronunciation);
+        assert_eq!(read("Ghibli", without), "Ghibli");
     }
 
     #[test]

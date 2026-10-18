@@ -15,7 +15,10 @@ Lightweight Windows text-to-speech tray app using SAPI, with an optional private
 - Decode HTML entities & expand numeric multiplication and common math symbols
 - Preserve punctuation & following text when shortening URLs
 - Text filters: All, None or per-category control from the tray menu
-- Remembers voice, speed & text filters between runs
+- Your own pronunciations in a plain text file, applied on the next reading
+- Hotkey presets: Alt, Ctrl+Alt or Ctrl+Shift with 1-4
+- Optional start with Windows
+- Remembers voice, speed, text filters & hotkeys between runs
 - Queue 2 seconds of silent audio after speech to help with Bluetooth end clipping
 - Idle and speaking tray states with embedded white line icons
 - Compact native menu with transparent colored line icons
@@ -28,8 +31,10 @@ Lightweight Windows text-to-speech tray app using SAPI, with an optional private
 - `Alt+3` - Cycle voice
 - `Alt+4` - Exit
 
-Voxi hotkeys do not open the foreground app's menu bar when Alt is released.
-Bare Alt still works normally.
+If another app already uses these, choose `Ctrl+Alt` or `Ctrl+Shift` under
+`Options`, `Hotkeys`; the keys stay 1-4 & the tray menu shows the current set. Voxi
+hotkeys do not open the foreground app's menu bar when Alt is released. Bare Alt
+still works normally.
 
 The menu shows Read while idle & Stop while speaking, including live updates
 while open. Read uses a speech bubble & Stop uses a stop square. Selecting Stop
@@ -62,7 +67,17 @@ Right-click the tray icon & open `Filters` to toggle categories or choose a pres
 
 Changing categories individually shows `Custom`. Voice & speed announcements always use
 All. None still replaces control characters & escapes XML so every voice gets valid
-input. Voxi saves the voice, speed & filters to `%APPDATA%\Voxi\settings.txt`.
+input. Voxi saves the voice, speed, filters & hotkeys to `%APPDATA%\Voxi\settings.txt`.
+
+## Options
+
+- `Start with Windows` launches Voxi when you sign in. It shows as off after Voxi moves
+  to another folder or is disabled in Task Manager; selecting it again fixes either.
+- `Hotkeys` picks the modifier for the 1-4 hotkeys.
+- `Edit words…` opens `%APPDATA%\Voxi\words.txt`, created on first use. Add one
+  pronunciation per line as `written = spoken`, such as `Ghibli = Jiblee`. Entries match
+  whole words, ignore case & apply with the Pronunciation filter, before the built-in
+  dictionary. Saved changes apply to the next reading.
 
 ## Install
 
