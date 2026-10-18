@@ -23,6 +23,7 @@ enum IconKind {
     Speed,
     Voice,
     Filter,
+    Options,
     Exit,
 }
 
@@ -40,14 +41,15 @@ pub(crate) struct MenuIcons {
     bitmaps: [OwnedBitmap; 4],
     stop: OwnedBitmap,
     filter: OwnedBitmap,
+    options: OwnedBitmap,
 }
 
 impl MenuIcons {
-    /// Items are addressed by command ID; a submenu has none, so the filter icon uses its position.
+    /// Items are addressed by command ID; submenus have none, so their icons use positions.
     pub(crate) unsafe fn install(
         menu: HMENU,
         item_ids: [usize; 4],
-        filter_position: Option<u32>,
+        submenu_positions: Option<(u32, u32)>,
     ) -> Result<Self> {
         let icons = Self {
             bitmaps: [
@@ -58,11 +60,14 @@ impl MenuIcons {
             ],
             stop: create_bitmap(IconKind::Stop)?,
             filter: create_bitmap(IconKind::Filter)?,
+            options: create_bitmap(IconKind::Options)?,
         };
 
         let by_id = item_ids.into_iter().map(|id| (id as u32, false));
-        let by_position = filter_position.map(|position| (position, true));
-        let bitmaps = icons.bitmaps.iter().chain(std::iter::once(&icons.filter));
+        let by_position = submenu_positions
+            .into_iter()
+            .flat_map(|(filter, options)| [(filter, true), (options, true)]);
+        let bitmaps = icons.bitmaps.iter().chain([&icons.filter, &icons.options]);
         for ((item, is_position), bitmap) in by_id.chain(by_position).zip(bitmaps) {
             SetMenuItemInfoW(
                 menu,
@@ -167,6 +172,14 @@ fn contains(kind: IconKind, x: f32, y: f32) -> bool {
             triangle(x, y, (2.0, 3.0), (14.0, 3.0), (8.0, 9.5))
                 || rounded_rect(x, y, 6.8, 8.0, 9.2, 13.5, 0.7)
         }
+        IconKind::Options => {
+            [(4.0, 5.5), (8.0, 10.5), (12.0, 6.5)]
+                .into_iter()
+                .any(|(line_y, knob_x)| {
+                    distance_to_segment(x, y, 2.5, line_y, 13.5, line_y) <= 0.75
+                        || (x - knob_x).powi(2) + (y - line_y).powi(2) <= 2.0 * 2.0
+                })
+        }
         IconKind::Exit => {
             distance_to_segment(x, y, 3.5, 3.5, 12.5, 12.5) <= 1.15
                 || distance_to_segment(x, y, 12.5, 3.5, 3.5, 12.5) <= 1.15
@@ -227,6 +240,8 @@ mod tests {
             IconKind::Stop,
             IconKind::Speed,
             IconKind::Voice,
+            IconKind::Filter,
+            IconKind::Options,
             IconKind::Exit,
         ] {
             let pixels = rasterize(kind);

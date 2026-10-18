@@ -1,3 +1,4 @@
+use crate::hotkeys::Modifier;
 use crate::text::FilterOptions;
 use std::fs;
 use std::io;
@@ -11,6 +12,7 @@ pub(crate) struct AppSettings {
     pub(crate) voice_name: Option<String>,
     pub(crate) speed: i32,
     pub(crate) filters: FilterOptions,
+    pub(crate) hotkeys: Modifier,
 }
 
 impl Default for AppSettings {
@@ -19,12 +21,13 @@ impl Default for AppSettings {
             voice_name: None,
             speed: 10,
             filters: FilterOptions::ALL,
+            hotkeys: Modifier::Alt,
         }
     }
 }
 
 pub(crate) fn load() -> AppSettings {
-    let Some(path) = settings_path() else {
+    let Some(path) = data_path(SETTINGS_FILE) else {
         return AppSettings::default();
     };
     let Ok(contents) = fs::read_to_string(path) else {
@@ -34,7 +37,7 @@ pub(crate) fn load() -> AppSettings {
 }
 
 pub(crate) fn save(settings: &AppSettings) -> io::Result<()> {
-    let path = settings_path().ok_or_else(|| {
+    let path = data_path(SETTINGS_FILE).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             "Windows did not provide an AppData directory",
@@ -46,10 +49,10 @@ pub(crate) fn save(settings: &AppSettings) -> io::Result<()> {
     fs::write(path, serialize(settings))
 }
 
-fn settings_path() -> Option<PathBuf> {
+pub(crate) fn data_path(file: &str) -> Option<PathBuf> {
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
-        .map(|path| path.join(SETTINGS_DIRECTORY).join(SETTINGS_FILE))
+        .map(|path| path.join(SETTINGS_DIRECTORY).join(file))
 }
 
 fn parse(contents: &str) -> AppSettings {
@@ -73,6 +76,11 @@ fn parse(contents: &str) -> AppSettings {
                     settings.filters = FilterOptions::from_mask(mask);
                 }
             }
+            "hotkeys" => {
+                if let Some(modifier) = Modifier::from_label(value) {
+                    settings.hotkeys = modifier;
+                }
+            }
             _ => {}
         }
     }
@@ -87,15 +95,17 @@ fn serialize(settings: &AppSettings) -> String {
         .unwrap_or_default()
         .replace(['\r', '\n'], " ");
     format!(
-        "voice={voice_name}\nspeed={}\nfilters={}\n",
+        "voice={voice_name}\nspeed={}\nfilters={}\nhotkeys={}\n",
         settings.speed,
-        settings.filters.mask()
+        settings.filters.mask(),
+        settings.hotkeys.label()
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{parse, serialize, AppSettings};
+    use crate::hotkeys::Modifier;
     use crate::text::{FilterCategory, FilterOptions};
 
     #[test]
@@ -105,11 +115,12 @@ mod tests {
     }
 
     #[test]
-    fn settings_round_trip_voice_speed_and_custom_filters() {
+    fn settings_round_trip_voice_speed_custom_filters_and_hotkeys() {
         let settings = AppSettings {
             voice_name: Some("Microsoft Eva".to_owned()),
             speed: 5,
             filters: FilterOptions::ALL.toggled(FilterCategory::Emoji),
+            hotkeys: Modifier::CtrlShift,
         };
         assert_eq!(parse(&serialize(&settings)), settings);
     }
